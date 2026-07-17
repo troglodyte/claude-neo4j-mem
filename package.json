@@ -1,0 +1,20 @@
+{
+  "name": "claude-neo4j-memory",
+  "version": "0.1.0",
+  "description": "Persistent, graph-based memory for Claude Code backed by Neo4j (local Docker or remote/Aura).",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "configure": "node scripts/configure.mjs",
+    "mcp-server": "node src/mcp/server.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.68.0",
+    "@modelcontextprotocol/sdk": "^1.19.0",
+    "neo4j-driver": "^5.28.0",
+    "zod": "^3.24.0"
+  },
+  "engines": {
+    "node": ">=18.17"
+  }
+}

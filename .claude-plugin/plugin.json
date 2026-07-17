@@ -1,0 +1,12 @@
+{
+  "name": "neo4j-memory",
+  "displayName": "Neo4j Memory",
+  "version": "0.1.0",
+  "description": "Persistent, graph-based memory for Claude Code backed by Neo4j. Runs against a local Docker container by default, or a remote/hosted Neo4j instance (e.g. Aura) when configured. Injects relevant memory at session start, captures new facts automatically at compaction/session end, and exposes on-demand search tools.",
+  "author": {
+    "name": "Michael Harris"
+  },
+  "keywords": ["memory", "neo4j", "graph", "knowledge-graph"],
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json"
+}

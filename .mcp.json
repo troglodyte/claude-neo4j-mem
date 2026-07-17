@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "neo4j-memory": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/src/mcp/server.js"]
+    }
+  }
+}

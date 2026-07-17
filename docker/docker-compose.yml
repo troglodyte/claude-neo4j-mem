@@ -1,0 +1,24 @@
+services:
+  neo4j:
+    image: neo4j:5-community
+    container_name: claude-neo4j-memory
+    restart: unless-stopped
+    ports:
+      - "${NEO4J_HTTP_PORT:-7474}:7474"
+      - "${NEO4J_BOLT_PORT:-7687}:7687"
+    environment:
+      NEO4J_AUTH: "${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD:?set NEO4J_PASSWORD in docker/.env}"
+      NEO4J_dbms_memory_pagecache_size: "512M"
+      NEO4J_server_memory_heap_max__size: "512M"
+    volumes:
+      - claude_neo4j_data:/data
+      - claude_neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD", "wget", "-O", "/dev/null", "-q", "http://localhost:7474"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  claude_neo4j_data:
+  claude_neo4j_logs:
