@@ -18,18 +18,33 @@ Works against either:
 
 - **`SessionStart` hook** queries the graph for the current project's most
   relevant recent entities/observations and injects them as context, plus a
-  note telling Claude which memory tools are available.
+  note telling Claude which memory tools are available. It also prints a short
+  visible banner in the terminal (e.g. `🧠 Neo4j memory: loaded 12
+  observation(s) across 5 entities for <project>.`) — or, if the plugin isn't
+  configured or Neo4j isn't reachable yet, a banner pointing you at
+  `scripts/setup-local.sh` / `README.md` instead of failing silently.
 - **MCP server** (`neo4j-memory`) exposes tools Claude can call any time during
   a session: `memory_search`, `memory_get_entity`, `memory_recent`,
   `memory_add_observations`, `memory_create_relation`,
-  `memory_delete_observations`, `memory_delete_entity`, `memory_status`.
+  `memory_delete_observations`, `memory_delete_entity`, `memory_timeline`,
+  `memory_status`. The write tools (`memory_add_observations`,
+  `memory_create_relation`, `memory_delete_observations`,
+  `memory_delete_entity`) return a `confirmation` string that Claude relays as
+  a short line (e.g. "🧠 remembered 2 observation(s) on ...") so mid-session
+  writes aren't silent. Turn this off with `npm run memory -- mute` (persists
+  in `~/.claude-neo4j/config.json`) or `CLAUDE_NEO4J_QUIET=1` (session-only);
+  `npm run memory -- unmute` turns it back on.
 - **`PreCompact`/`SessionEnd` hooks** read the new part of the transcript since
-  the last capture, ask a small model (Claude Haiku, via the Anthropic API) to
-  extract durable facts as structured entities/observations/relations, and
-  write them into Neo4j automatically — a backstop for anything Claude didn't
-  explicitly save with `memory_add_observations`. This step is **optional**:
-  if `ANTHROPIC_API_KEY` isn't set, it's silently skipped and everything else
-  keeps working.
+  the last capture and shell out to a locked-down, one-shot headless
+  `claude -p` call (Haiku, no tools, no MCP servers, no settings/CLAUDE.md
+  inheritance, structured output via `--json-schema`) to extract durable facts
+  as entities/observations/relations, then write them into Neo4j automatically
+  — a backstop for anything Claude didn't explicitly save with
+  `memory_add_observations`. Because this runs through the `claude` CLI itself
+  rather than the Anthropic SDK, it rides on your existing logged-in session
+  instead of needing a separate `ANTHROPIC_API_KEY`. Set
+  `CLAUDE_NEO4J_DISABLE_CAPTURE=1` to turn it off; everything else keeps
+  working either way.
 - Recall uses Neo4j's built-in full-text indexes and relationship traversal —
   no embedding API, no vector store, no extra cost for search itself.
 
@@ -50,6 +65,13 @@ basename), so memory from unrelated repos doesn't bleed into each other; a
 `project IS NULL` entity is treated as global and shows up everywhere.
 
 ## Setup
+
+**Quick start (local Docker):** if you have Docker installed, `npm install &&
+scripts/setup-local.sh` does everything below for you — generates
+`docker/.env` with a random password if missing, starts the container, waits
+for it to be healthy, and configures the plugin against it. Safe to re-run any
+time. If you don't have Docker (or would rather not use it), skip to the
+manual steps below and use the remote/Aura path instead.
 
 ### 1. Install dependencies
 
@@ -95,17 +117,18 @@ Config resolution order at runtime: env vars (`NEO4J_URI`, `NEO4J_USERNAME`,
 Docker defaults. Env vars are handy for switching a single session to a
 different database without touching the saved config.
 
-### 4. (Optional) enable automatic capture
+### 4. (Optional) disable automatic capture
+
+Automatic capture is on by default: `PreCompact`/`SessionEnd` shell out to a
+headless `claude -p` call to extract anything Claude didn't explicitly save
+via `memory_add_observations`. It uses the `claude` CLI already on your PATH
+(your existing logged-in session — no separate API key needed) and Claude
+Haiku by default; override the model with `CLAUDE_NEO4J_CAPTURE_MODEL` or the
+CLI it shells out to with `CLAUDE_NEO4J_CAPTURE_CLI`. To turn it off:
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
+export CLAUDE_NEO4J_DISABLE_CAPTURE=1
 ```
-
-Without this, memory only grows when Claude explicitly calls
-`memory_add_observations` (which the injected context encourages it to do).
-With it, `PreCompact`/`SessionEnd` also extract anything Claude didn't
-explicitly save. Uses Claude Haiku by default; override with
-`CLAUDE_NEO4J_CAPTURE_MODEL`.
 
 ### 5. Load the plugin
 
@@ -130,8 +153,23 @@ the configure wizard against it using the credentials in `docker/.env`.
   skill / `memory_search` tool.
 - Ask "is memory working?" / "what's my memory status" — uses `memory-status`
   / `memory_status`.
+- Ask for a "timeline report" / "journey into this project" — uses the
+  `timeline-report` skill / `memory_timeline` tool to narrate the project's
+  history from the graph.
 - Tell Claude to forget something — it can call `memory_delete_entity` /
   `memory_delete_observations`.
+
+### Outside a Claude session
+
+- `npm run memory -- status` (or any subcommand: `search`, `recent`, `get`,
+  `add`, `relate`, `timeline`, `forget-obs`, `forget`, `mute`, `unmute`) —
+  query/edit the graph from a terminal. Run with no args for full usage.
+- `scripts/check-health.sh` — verifies Docker container health, plugin config,
+  Neo4j auth, and the MCP handshake in one shot.
+- A statusline showing `<model> · 🧠 <entities>e/<observations>o` can be wired
+  via `scripts/statusline.mjs` (see `.claude/settings.local.json`).
+- The full graph is also browsable directly in Neo4j's own UI at
+  `http://localhost:7474` (local mode) — no custom viewer needed.
 
 ## Project layout
 
@@ -139,7 +177,7 @@ the configure wizard against it using the credentials in `docker/.env`.
 .claude-plugin/plugin.json   plugin manifest
 hooks/hooks.json             SessionStart / PreCompact / SessionEnd wiring
 .mcp.json                    bundled MCP server registration
-skills/                      memory-search, memory-status
+skills/                      memory-search, memory-status, timeline-report
 src/lib/                     config resolution, Neo4j client, schema, graph ops, project detection
 src/mcp/server.js            MCP tools
 src/hooks/                   session-start.js, capture.js
@@ -147,6 +185,9 @@ docker/                      docker-compose.yml for local Neo4j
 scripts/configure.mjs        interactive setup wizard
 scripts/setup-local.sh       one-shot: start container + configure (local mode)
 scripts/claude-with-memory.sh  launch `claude --plugin-dir` without retyping the path
+scripts/check-health.sh      end-to-end health check (container/config/auth/MCP handshake)
+scripts/memory-cli.mjs       terminal CLI for the memory graph (search/add/timeline/etc.)
+scripts/statusline.mjs       Claude Code statusLine command showing live memory counts
 CLAUDE.md                    current build status / continuation notes for this repo
 ```
 

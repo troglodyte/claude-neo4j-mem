@@ -1,16 +1,48 @@
 #!/usr/bin/env bash
-# Waits for the local Neo4j container to be healthy, then runs the configure
-# wizard non-interactively using the credentials already in docker/.env.
+# One-command local setup: checks Docker is available, generates docker/.env
+# if missing, starts/waits for the Neo4j container, then configures the
+# plugin against it. Safe to re-run any time (idempotent).
 # Usage: ./scripts/setup-local.sh   (or from repo root: scripts/setup-local.sh)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+if ! command -v docker >/dev/null 2>&1; then
+  cat >&2 <<'EOF'
+Docker is not installed (or not on PATH), so the bundled local Neo4j
+container can't be started. Two ways forward:
+
+  1. Install Docker, then re-run this script:
+       https://docs.docker.com/get-docker/
+
+  2. Skip Docker and point the plugin at a remote Neo4j instance instead
+     (e.g. Neo4j Aura's free tier: https://console.neo4j.io):
+       node scripts/configure.mjs --mode remote \
+         --uri neo4j+s://xxxxx.databases.neo4j.io \
+         --username neo4j --password '...' --database neo4j
+EOF
+  exit 1
+fi
+
+if ! docker info >/dev/null 2>&1; then
+  echo "Docker is installed but its daemon isn't reachable. Start Docker Desktop (or the docker service), then re-run this script." >&2
+  exit 1
+fi
+
 ENV_FILE="docker/.env"
 if [ ! -f "$ENV_FILE" ]; then
-  echo "Missing $ENV_FILE. Run: cp docker/.env.example docker/.env && edit the password." >&2
-  exit 1
+  echo "No $ENV_FILE yet — generating one with a random password."
+  cp docker/.env.example "$ENV_FILE"
+  if command -v openssl >/dev/null 2>&1; then
+    generated_password="$(openssl rand -hex 16)"
+  else
+    generated_password="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  fi
+  # Portable in-place edit: write to a temp file, then replace (macOS `sed -i`
+  # requires a backup-suffix arg; this form works the same on both GNU and BSD sed).
+  sed "s/^NEO4J_PASSWORD=.*/NEO4J_PASSWORD=${generated_password}/" "$ENV_FILE" > "$ENV_FILE.tmp"
+  mv "$ENV_FILE.tmp" "$ENV_FILE"
 fi
 
 # shellcheck disable=SC1090

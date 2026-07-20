@@ -1,56 +1,76 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
-import Anthropic from "@anthropic-ai/sdk";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { ensureSchema } from "../lib/schema.js";
 import { detectProject } from "../lib/project.js";
 import { addObservations, createRelation } from "../lib/graph.js";
 import { closeDriver, verifyConnectivity } from "../lib/neo4jClient.js";
-import { isConfigured, STATE_DIR, ensureStateDir } from "../lib/config.js";
+import { isConfigured, CONFIG_DIR, STATE_DIR, ensureStateDir } from "../lib/config.js";
+
+const SCRIPT_PATH = fileURLToPath(import.meta.url);
+const LOG_FILE = path.join(CONFIG_DIR, "capture.log");
+// Presence of this env var means "I am the detached SessionEnd worker" - it
+// carries the path to the hook input file instead of reading stdin.
+const INPUT_FILE_ENV = "CLAUDE_NEO4J_CAPTURE_INPUT_FILE";
 
 const MAX_CHARS = 15000;
-const CAPTURE_MODEL = process.env.CLAUDE_NEO4J_CAPTURE_MODEL ?? "claude-haiku-4-5-20251001";
+// Model alias, not a raw ID: passed straight through to `claude --model`.
+const CAPTURE_MODEL = process.env.CLAUDE_NEO4J_CAPTURE_MODEL ?? "haiku";
+// Headless Claude Code CLI, not the Anthropic SDK: rides on the user's own
+// logged-in session (OAuth/subscription), so auto-capture doesn't need a
+// separate ANTHROPIC_API_KEY. Same trick claude-mem uses.
+const CLAUDE_BIN = process.env.CLAUDE_NEO4J_CAPTURE_CLI ?? "claude";
+const CAPTURE_TIMEOUT_MS = 90_000;
 
 const EXTRACTION_SYSTEM_PROMPT = `You extract durable, worth-remembering facts from a slice of a coding-assistant conversation transcript.
-Call record_memories exactly once with:
+Respond with JSON matching the given schema:
 - entities: distinct people, projects, decisions, or preferences/conventions mentioned, each as {name, type, observations}. Use short stable names (e.g. "user", "decision:auth-approach", "preference:testing", "project:<repo>"). Only include observations that would still be useful in a future, unrelated session - skip step-by-step task narration, file paths, or anything ephemeral to this one task.
 - relations: {from, to, type} triples linking entities, e.g. {from: "project:claude-neo4j", type: "uses", to: "neo4j-driver"}.
-If nothing is worth remembering, call record_memories with empty arrays for both.`;
+If nothing is worth remembering, respond with empty arrays for both.`;
 
-const RECORD_MEMORIES_TOOL = {
-  name: "record_memories",
-  description: "Record durable facts extracted from the conversation into the memory graph.",
-  input_schema: {
-    type: "object",
-    properties: {
-      entities: {
-        type: "array",
-        items: {
-          type: "object",
-          properties: {
-            name: { type: "string" },
-            type: { type: "string" },
-            observations: { type: "array", items: { type: "string" } },
-          },
-          required: ["name", "observations"],
+const RECORD_MEMORIES_SCHEMA = {
+  type: "object",
+  properties: {
+    entities: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+          type: { type: "string" },
+          observations: { type: "array", items: { type: "string" } },
         },
-      },
-      relations: {
-        type: "array",
-        items: {
-          type: "object",
-          properties: {
-            from: { type: "string" },
-            to: { type: "string" },
-            type: { type: "string" },
-          },
-          required: ["from", "to", "type"],
-        },
+        required: ["name", "observations"],
       },
     },
-    required: ["entities", "relations"],
+    relations: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          from: { type: "string" },
+          to: { type: "string" },
+          type: { type: "string" },
+        },
+        required: ["from", "to", "type"],
+      },
+    },
   },
+  required: ["entities", "relations"],
 };
+
+// The detached SessionEnd worker has no attached stdout/stderr (stdio:
+// "ignore"), so this file is the only way to see what it did.
+function log(message) {
+  try {
+    fs.mkdirSync(CONFIG_DIR, { recursive: true });
+    fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${message}\n`);
+  } catch {
+    // best-effort logging only
+  }
+}
 
 function stateFilePath(sessionId) {
   return path.join(STATE_DIR, `${sessionId}.json`);
@@ -104,25 +124,166 @@ function readNewTranscriptText(transcriptPath, lastLine) {
   return { text: turns.join("\n\n"), totalLines: lines.length };
 }
 
-async function extractMemories(transcriptText) {
-  const anthropic = new Anthropic();
-  const response = await anthropic.messages.create({
-    model: CAPTURE_MODEL,
-    max_tokens: 1024,
-    system: EXTRACTION_SYSTEM_PROMPT,
-    messages: [{ role: "user", content: transcriptText }],
-    tools: [RECORD_MEMORIES_TOOL],
-    tool_choice: { type: "tool", name: "record_memories" },
+// Runs the extraction as a locked-down, one-shot headless `claude -p` call:
+// no tools, no MCP servers, no CLAUDE.md/settings inheritance, no session
+// persisted to disk - it only ever gets to return the JSON schema payload.
+function runClaudeExtraction(transcriptText) {
+  return new Promise((resolve, reject) => {
+    const args = [
+      "-p",
+      "--system-prompt",
+      EXTRACTION_SYSTEM_PROMPT,
+      "--output-format",
+      "json",
+      "--json-schema",
+      JSON.stringify(RECORD_MEMORIES_SCHEMA),
+      "--tools",
+      "",
+      "--permission-mode",
+      "dontAsk",
+      "--setting-sources",
+      "",
+      "--strict-mcp-config",
+      "--no-session-persistence",
+      "--model",
+      CAPTURE_MODEL,
+    ];
+
+    const child = spawn(CLAUDE_BIN, args, { stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`claude extraction timed out after ${CAPTURE_TIMEOUT_MS}ms`));
+    }, CAPTURE_TIMEOUT_MS);
+
+    child.stdout.on("data", (chunk) => (stdout += chunk));
+    child.stderr.on("data", (chunk) => (stderr += chunk));
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        reject(new Error(`claude exited ${code}: ${stderr.slice(0, 500)}`));
+        return;
+      }
+      resolve(stdout);
+    });
+
+    child.stdin.write(transcriptText);
+    child.stdin.end();
   });
-  const toolUse = response.content.find((block) => block.type === "tool_use" && block.name === "record_memories");
-  return toolUse?.input ?? { entities: [], relations: [] };
+}
+
+async function extractMemories(transcriptText) {
+  const stdout = await runClaudeExtraction(transcriptText);
+  const result = JSON.parse(stdout);
+  if (result.is_error) {
+    throw new Error(`claude extraction error: ${result.result ?? "unknown"}`);
+  }
+  const structured = result.structured_output ?? JSON.parse(result.result ?? "{}");
+  return { entities: structured.entities ?? [], relations: structured.relations ?? [] };
+}
+
+// Does the actual capture: read new transcript text, extract memories via a
+// headless claude call, write them to Neo4j. Shared by the synchronous
+// PreCompact path and the detached SessionEnd worker.
+async function runCapture({ sessionId, transcriptPath, cwd }) {
+  await verifyConnectivity();
+
+  const state = readState(sessionId);
+  const { text, totalLines } = readNewTranscriptText(transcriptPath, state.lastLine);
+
+  if (totalLines <= state.lastLine || text.trim().length < 40) {
+    return { added: 0 };
+  }
+
+  await ensureSchema();
+
+  const project = detectProject(cwd);
+  const memories = await extractMemories(text.slice(-MAX_CHARS));
+
+  let added = 0;
+  for (const entity of memories.entities ?? []) {
+    if (!entity.observations?.length) continue;
+    await addObservations({
+      entity: entity.name,
+      entityType: entity.type,
+      observations: entity.observations,
+      sessionId,
+      project,
+    });
+    added += entity.observations.length;
+  }
+  for (const relation of memories.relations ?? []) {
+    if (!relation.from || !relation.to || !relation.type) continue;
+    await createRelation({ from: relation.from, to: relation.to, type: relation.type, project });
+  }
+
+  writeState(sessionId, { lastLine: totalLines });
+  return { added };
+}
+
+// SessionEnd fires while Claude Code is tearing the process down, with a
+// grace window shorter than a headless `claude -p` extraction call takes -
+// verified empirically ("Hook cancelled" every time it ran inline). Detach
+// the real work into an independent background process (the same fix
+// claude-mem's worker-daemon pattern gets for free) so the hook itself
+// returns before teardown cancels it, and extraction finishes on its own
+// time, decoupled from this process's lifetime.
+function detachSessionEndCapture(input) {
+  ensureStateDir();
+  const inputFile = path.join(STATE_DIR, `${input.session_id}-${Date.now()}.sessionend.json`);
+  fs.writeFileSync(inputFile, JSON.stringify(input));
+
+  const child = spawn(process.execPath, [SCRIPT_PATH], {
+    detached: true,
+    stdio: "ignore",
+    env: { ...process.env, [INPUT_FILE_ENV]: inputFile },
+  });
+  child.unref();
+  log(`SessionEnd: detached background capture pid=${child.pid} for session ${input.session_id}`);
+}
+
+async function runDetachedWorker(inputFile) {
+  let input;
+  try {
+    input = JSON.parse(fs.readFileSync(inputFile, "utf8"));
+  } catch (error) {
+    log(`SessionEnd worker: failed to read input file ${inputFile}: ${error.message}`);
+    return;
+  }
+
+  const { session_id: sessionId, transcript_path: transcriptPath, cwd } = input;
+  try {
+    const { added } = await runCapture({ sessionId, transcriptPath, cwd });
+    log(`SessionEnd worker: captured ${added} observation(s) for session ${sessionId}`);
+  } catch (error) {
+    log(`SessionEnd worker: capture failed for session ${sessionId}: ${error.message}`);
+  } finally {
+    await closeDriver();
+    try {
+      fs.unlinkSync(inputFile);
+    } catch {
+      // best-effort cleanup
+    }
+  }
 }
 
 async function main() {
+  const inputFile = process.env[INPUT_FILE_ENV];
+  if (inputFile) {
+    await runDetachedWorker(inputFile);
+    return;
+  }
+
   const input = JSON.parse(fs.readFileSync(0, "utf8") || "{}");
   const { session_id: sessionId, transcript_path: transcriptPath, cwd, hook_event_name: eventName } = input;
 
-  if (!isConfigured() || !process.env.ANTHROPIC_API_KEY || !sessionId || !transcriptPath) {
+  if (!isConfigured() || process.env.CLAUDE_NEO4J_DISABLE_CAPTURE || !sessionId || !transcriptPath) {
     process.stdout.write("{}");
     return;
   }
@@ -132,40 +293,18 @@ async function main() {
     return;
   }
 
+  if (eventName === "SessionEnd") {
+    try {
+      detachSessionEndCapture(input);
+    } catch (error) {
+      log(`SessionEnd: failed to detach background capture: ${error.message}`);
+    }
+    process.stdout.write("{}");
+    return;
+  }
+
   try {
-    await verifyConnectivity();
-
-    const state = readState(sessionId);
-    const { text, totalLines } = readNewTranscriptText(transcriptPath, state.lastLine);
-
-    if (totalLines <= state.lastLine || text.trim().length < 40) {
-      process.stdout.write("{}");
-      return;
-    }
-
-    await ensureSchema();
-
-    const project = detectProject(cwd);
-    const memories = await extractMemories(text.slice(-MAX_CHARS));
-
-    let added = 0;
-    for (const entity of memories.entities ?? []) {
-      if (!entity.observations?.length) continue;
-      await addObservations({
-        entity: entity.name,
-        entityType: entity.type,
-        observations: entity.observations,
-        sessionId,
-        project,
-      });
-      added += entity.observations.length;
-    }
-    for (const relation of memories.relations ?? []) {
-      if (!relation.from || !relation.to || !relation.type) continue;
-      await createRelation({ from: relation.from, to: relation.to, type: relation.type, project });
-    }
-
-    writeState(sessionId, { lastLine: totalLines });
+    const { added } = await runCapture({ sessionId, transcriptPath, cwd });
 
     if (eventName === "PreCompact") {
       process.stdout.write(
@@ -182,6 +321,7 @@ async function main() {
     }
   } catch (error) {
     process.stderr.write(`claude-neo4j: capture failed: ${error.message}\n`);
+    log(`${eventName ?? "capture"}: failed: ${error.message}`);
     process.stdout.write("{}");
   } finally {
     await closeDriver();

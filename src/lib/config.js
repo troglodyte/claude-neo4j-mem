@@ -36,6 +36,22 @@ export function loadConnectionConfig() {
   return { uri, username, password, database, mode };
 }
 
+/**
+ * Whether write-tool responses should include a human-readable confirmation
+ * for the assistant to relay to the user. Muted via env var (session-scoped)
+ * or the config file (persistent, `npm run memory -- mute`/`unmute`).
+ */
+export function shouldNotifyOnWrite() {
+  if (process.env.CLAUDE_NEO4J_QUIET === "1") return false;
+  const fileConfig = readConfigFile() ?? {};
+  return fileConfig.notifyOnWrite !== false;
+}
+
+export function setNotifyOnWrite(enabled) {
+  const fileConfig = readConfigFile() ?? {};
+  writeConfigFile({ ...fileConfig, notifyOnWrite: enabled });
+}
+
 export function isConfigured() {
   try {
     loadConnectionConfig();

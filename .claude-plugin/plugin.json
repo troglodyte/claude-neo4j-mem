@@ -6,7 +6,5 @@
   "author": {
     "name": "Michael Harris"
   },
-  "keywords": ["memory", "neo4j", "graph", "knowledge-graph"],
-  "hooks": "./hooks/hooks.json",
-  "mcpServers": "./.mcp.json"
+  "keywords": ["memory", "neo4j", "graph", "knowledge-graph"]
 }

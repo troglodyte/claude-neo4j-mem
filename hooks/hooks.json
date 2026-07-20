@@ -15,7 +15,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/hooks/capture.js\""
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/hooks/capture.js\"",
+            "timeout": 100
           }
         ]
       }
@@ -25,7 +26,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/hooks/capture.js\""
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/hooks/capture.js\"",
+            "timeout": 100
           }
         ]
       }

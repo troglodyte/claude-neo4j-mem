@@ -1,0 +1,16 @@
+{
+  "name": "claude-neo4j-local",
+  "owner": {
+    "name": "Michael Harris"
+  },
+  "metadata": {
+    "description": "Local marketplace for the neo4j-memory plugin (this repo)"
+  },
+  "plugins": [
+    {
+      "name": "neo4j-memory",
+      "source": ".",
+      "description": "Persistent, graph-based memory for Claude Code backed by Neo4j."
+    }
+  ]
+}
