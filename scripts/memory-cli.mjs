@@ -12,6 +12,7 @@ function usage() {
 
 Commands:
   status                              connection info + entity/observation counts
+  projects                             list every project tracked in the db (across all projects, not scoped to cwd)
   search <query> [--limit N]          full-text search entities/observations
   recent [--limit N]                  most recently updated entities
   get <entity>                        full detail for one entity
@@ -20,6 +21,9 @@ Commands:
   timeline [--since DATE] [--limit N] chronological observation history
   forget-obs <entity> <id...>         delete specific observations by id
   forget <entity>                     delete an entity and all its data
+  prune [--older-than-days N] [--keep-per-entity N] [--dry-run]
+                                       delete observations older than N days (default 180),
+                                       keeping the most recent N per entity (default 3) regardless of age
   mute                                 stop relaying "remembered ..."/"forgot ..." confirmations mid-session
   unmute                               resume relaying write confirmations (default)
 
@@ -36,7 +40,7 @@ function parseFlags(args, flagSpecs) {
     const arg = args[i];
     if (arg.startsWith("--") && flagSpecs[arg.slice(2)]) {
       const name = arg.slice(2);
-      flags[name] = args[++i];
+      flags[name] = flagSpecs[name] === "boolean" ? true : args[++i];
     } else {
       rest.push(arg);
     }
@@ -63,7 +67,15 @@ async function main() {
   const [command, ...rest] = process.argv.slice(2);
   if (!command) usage();
 
-  const { rest: args, flags } = parseFlags(rest, { project: true, limit: true, type: true, since: true });
+  const { rest: args, flags } = parseFlags(rest, {
+    project: true,
+    limit: true,
+    type: true,
+    since: true,
+    "older-than-days": true,
+    "keep-per-entity": true,
+    "dry-run": "boolean",
+  });
   const project = flags.project ?? detectProject(process.cwd());
   const limit = flags.limit ? Number(flags.limit) : undefined;
 
@@ -74,6 +86,14 @@ async function main() {
       const { uri, database, mode } = loadConnectionConfig();
       const counts = await graph.getStatus({ project });
       console.log(JSON.stringify({ uri, database, mode, project, ...counts }, null, 2));
+      break;
+    }
+    case "projects": {
+      const projects = await graph.listProjects();
+      if (projects.length === 0) console.log("No projects tracked yet.");
+      for (const p of projects) {
+        console.log(`${p.project}  (${p.entityCount} entit${p.entityCount === 1 ? "y" : "ies"}, ${p.observationCount} observation(s), last activity ${p.lastActivity ?? "n/a"})`);
+      }
       break;
     }
     case "search": {
@@ -130,6 +150,18 @@ async function main() {
       if (!entity) usage();
       await graph.deleteEntity(entity, project);
       console.log(`Deleted entity "${entity}" and its observations/relations.`);
+      break;
+    }
+    case "prune": {
+      const olderThanDays = flags["older-than-days"] ? Number(flags["older-than-days"]) : 180;
+      const keepPerEntity = flags["keep-per-entity"] ? Number(flags["keep-per-entity"]) : 3;
+      const dryRun = Boolean(flags["dry-run"]);
+      const { pruned, sample } = await graph.pruneObservations({ project, olderThanDays, keepPerEntity, dryRun });
+      console.log(
+        `${dryRun ? "[dry-run] " : ""}${pruned} observation(s) older than ${olderThanDays} day(s) ` +
+          `(keeping ${keepPerEntity} most recent per entity)${dryRun ? " would be deleted" : " deleted"}.`
+      );
+      for (const o of sample) console.log(`  - [${o.id}] ${o.text}`);
       break;
     }
     case "mute": {

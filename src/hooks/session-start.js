@@ -7,6 +7,7 @@ import { detectProject } from "../lib/project.js";
 import { upsertSession, getRecentContext, getStatus } from "../lib/graph.js";
 import { closeDriver, verifyConnectivity } from "../lib/neo4jClient.js";
 import { isConfigured } from "../lib/config.js";
+import { consumeCaptureDigest } from "../lib/captureDigest.js";
 
 const CLAUDE_MEM_DB = path.join(homedir(), ".claude-mem", "claude-mem.db");
 
@@ -45,10 +46,12 @@ async function claudeMemMigrationHint(project, cwd) {
 const TOOLS_BLURB =
   "You have a persistent Neo4j-backed memory graph available via MCP tools: memory_search, " +
   "memory_get_entity, memory_recent, memory_add_observations, memory_create_relation, " +
-  "memory_delete_observations, memory_delete_entity, memory_status. Call memory_add_observations " +
-  "when you learn a durable fact, decision, or preference worth keeping beyond this session " +
-  "(automatic capture also runs at compaction and session end as a backstop, so you don't need to " +
-  "log everything manually).";
+  "memory_delete_observations, memory_delete_entity, memory_prune, memory_list_projects, " +
+  "memory_status. Call " +
+  "memory_add_observations when you learn a durable fact, decision, or preference worth keeping " +
+  "beyond this session (automatic capture also runs at compaction and session end as a backstop, " +
+  "so you don't need to log everything manually). memory_prune deletes old observations - only " +
+  "call it with dryRun: false if the user explicitly asks to clean up/prune old memories.";
 
 const SETUP_HINT =
   "Run scripts/setup-local.sh (needs Docker; generates docker/.env and starts the container for you) " +
@@ -94,6 +97,11 @@ async function main() {
           ` Found ${claudeMemCount} claude-mem record(s) for this project - run ` +
           `\`npm run migrate-claude-mem\` to import them (one-off, only when you ask for it).`;
       }
+    }
+
+    const digest = consumeCaptureDigest(project);
+    if (digest) {
+      systemMessage += ` (Auto-capture also saved ${digest.added} observation(s) in the background since your last session.)`;
     }
 
     process.stdout.write(

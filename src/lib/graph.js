@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { withSession, int } from "./neo4jClient.js";
+import { resolveCanonicalName } from "./dedup.js";
 
 // Cypher can't match a literal `null` in a property map (MERGE {project: null}
 // never finds an existing node, since equality against null is always
@@ -21,6 +22,17 @@ async function upsertEntity(session, name, type, project) {
   );
 }
 
+export async function listEntityNames(project) {
+  return withSession(async (session) => {
+    const result = await session.run(
+      `MATCH (e:Entity) WHERE $project IS NULL OR e.project = $project OR e.project IS NULL
+       RETURN e.name AS name`,
+      { project: project ?? null }
+    );
+    return result.records.map((r) => r.get("name"));
+  });
+}
+
 export async function upsertSession({ id, cwd, project }) {
   return withSession(async (session) => {
     await session.run(
@@ -34,6 +46,8 @@ export async function upsertSession({ id, cwd, project }) {
 export async function addObservations({ entity, entityType, observations, sessionId, project }) {
   const rows = observations.map((text) => ({ id: randomUUID(), text }));
   await withSession(async (session) => {
+    const existingNames = await listEntityNames(project);
+    entity = resolveCanonicalName(entity, existingNames);
     await upsertEntity(session, entity, entityType, project);
     await session.run(
       `MATCH (e:Entity {name: $entity})
@@ -56,6 +70,9 @@ export async function addObservations({ entity, entityType, observations, sessio
 
 export async function createRelation({ from, to, type, project }) {
   return withSession(async (session) => {
+    const existingNames = await listEntityNames(project);
+    from = resolveCanonicalName(from, existingNames);
+    to = resolveCanonicalName(to, existingNames);
     await upsertEntity(session, from, null, project);
     await upsertEntity(session, to, null, project);
     await session.run(
@@ -82,17 +99,23 @@ export async function searchMemory(query, limit = 10, project = null) {
        }
        WITH entity, max(score) AS score
        WHERE $project IS NULL OR entity.project = $project OR entity.project IS NULL
-       ORDER BY score DESC
+       OPTIONAL MATCH (recentObs:Observation)-[:ABOUT]->(entity)
+       WITH entity, score, max(recentObs.createdAt) AS lastSeen
+       WITH entity, score,
+         CASE WHEN lastSeen IS NULL THEN score
+              ELSE score * (1.0 / (1.0 + duration.inDays(lastSeen, datetime()).days / 30.0))
+         END AS rankScore
+       ORDER BY rankScore DESC
        LIMIT $limit
        OPTIONAL MATCH (o:Observation)-[:ABOUT]->(entity)
-       WITH entity, score, o
+       WITH entity, rankScore, o
        ORDER BY o.createdAt DESC
-       WITH entity, score, collect(o.text)[0..5] AS observations
+       WITH entity, rankScore, collect(o.text)[0..5] AS observations
        OPTIONAL MATCH (entity)-[r:RELATES_TO]-(other)
-       WITH entity, score, observations, collect(DISTINCT CASE WHEN r IS NULL THEN NULL ELSE {type: r.type, entity: other.name} END) AS relationsRaw
-       WITH entity, score, observations, [x IN relationsRaw WHERE x IS NOT NULL] AS relations
-       RETURN entity.name AS name, entity.type AS type, score, observations, relations
-       ORDER BY score DESC`,
+       WITH entity, rankScore, observations, collect(DISTINCT CASE WHEN r IS NULL THEN NULL ELSE {type: r.type, entity: other.name} END) AS relationsRaw
+       WITH entity, rankScore, observations, [x IN relationsRaw WHERE x IS NOT NULL] AS relations
+       RETURN entity.name AS name, entity.type AS type, rankScore AS score, observations, relations
+       ORDER BY rankScore DESC`,
       { query, limit: int(limit), project: project ?? null }
     );
     return result.records.map((r) => r.toObject());
@@ -184,6 +207,51 @@ export async function getTimeline({ project, since, limit = 300 }) {
       { project: project ?? null, since: since ?? null, limit: int(limit) }
     );
     return result.records.map((r) => r.toObject());
+  });
+}
+
+// Deletes observations older than `olderThanDays`, keeping the most recent
+// `keepPerEntity` on every entity regardless of age (so an entity never gets
+// wiped down to nothing just because nobody's touched it in a while).
+export async function pruneObservations({ project, olderThanDays = 180, keepPerEntity = 3, dryRun = false }) {
+  return withSession(async (session) => {
+    const result = await session.run(
+      `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
+       WHERE ($project IS NULL OR e.project = $project OR e.project IS NULL)
+         AND o.createdAt < datetime() - duration({days: $olderThanDays})
+       WITH e, o ORDER BY o.createdAt DESC
+       WITH e, collect(o) AS obs
+       WITH e, obs[$keepPerEntity..] AS stale
+       UNWIND stale AS o
+       WITH o, o.id AS id, o.text AS text
+       ${dryRun ? "" : "DETACH DELETE o"}
+       RETURN count(o) AS pruned, collect({id: id, text: text})[0..20] AS sample`,
+      { project: project ?? null, olderThanDays, keepPerEntity: int(keepPerEntity) }
+    );
+    const record = result.records[0];
+    return {
+      pruned: record?.get("pruned")?.toNumber() ?? 0,
+      sample: record?.get("sample") ?? [],
+    };
+  });
+}
+
+export async function listProjects() {
+  return withSession(async (session) => {
+    const result = await session.run(
+      `MATCH (e:Entity)
+       WHERE e.project IS NOT NULL
+       OPTIONAL MATCH (o:Observation)-[:ABOUT]->(e)
+       WITH e.project AS project, count(DISTINCT e) AS entityCount, count(o) AS observationCount, max(o.createdAt) AS lastActivity
+       RETURN project, entityCount, observationCount, toString(lastActivity) AS lastActivity
+       ORDER BY lastActivity DESC`
+    );
+    return result.records.map((r) => ({
+      project: r.get("project"),
+      entityCount: r.get("entityCount").toNumber(),
+      observationCount: r.get("observationCount").toNumber(),
+      lastActivity: r.get("lastActivity"),
+    }));
   });
 }
 

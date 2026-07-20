@@ -5,9 +5,10 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { ensureSchema } from "../lib/schema.js";
 import { detectProject } from "../lib/project.js";
-import { addObservations, createRelation } from "../lib/graph.js";
+import { addObservations, createRelation, listEntityNames } from "../lib/graph.js";
 import { closeDriver, verifyConnectivity } from "../lib/neo4jClient.js";
 import { isConfigured, CONFIG_DIR, STATE_DIR, ensureStateDir } from "../lib/config.js";
+import { recordCapture } from "../lib/captureDigest.js";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const LOG_FILE = path.join(CONFIG_DIR, "capture.log");
@@ -24,11 +25,20 @@ const CAPTURE_MODEL = process.env.CLAUDE_NEO4J_CAPTURE_MODEL ?? "haiku";
 const CLAUDE_BIN = process.env.CLAUDE_NEO4J_CAPTURE_CLI ?? "claude";
 const CAPTURE_TIMEOUT_MS = 90_000;
 
-const EXTRACTION_SYSTEM_PROMPT = `You extract durable, worth-remembering facts from a slice of a coding-assistant conversation transcript.
+function buildExtractionSystemPrompt(knownNames) {
+  const base = `You extract durable, worth-remembering facts from a slice of a coding-assistant conversation transcript.
 Respond with JSON matching the given schema:
 - entities: distinct people, projects, decisions, or preferences/conventions mentioned, each as {name, type, observations}. Use short stable names (e.g. "user", "decision:auth-approach", "preference:testing", "project:<repo>"). Only include observations that would still be useful in a future, unrelated session - skip step-by-step task narration, file paths, or anything ephemeral to this one task.
 - relations: {from, to, type} triples linking entities, e.g. {from: "project:claude-neo4j", type: "uses", to: "neo4j-driver"}.
 If nothing is worth remembering, respond with empty arrays for both.`;
+  if (!knownNames.length) return base;
+  return (
+    base +
+    `\n\nThese entity names already exist in memory for this project - if a fact in this transcript is about ` +
+    `one of them, reuse the exact existing name below instead of inventing a new one (e.g. don't create ` +
+    `"plugin:foo" if "project:foo" already refers to the same thing):\n${knownNames.map((n) => `- ${n}`).join("\n")}`
+  );
+}
 
 const RECORD_MEMORIES_SCHEMA = {
   type: "object",
@@ -127,12 +137,12 @@ function readNewTranscriptText(transcriptPath, lastLine) {
 // Runs the extraction as a locked-down, one-shot headless `claude -p` call:
 // no tools, no MCP servers, no CLAUDE.md/settings inheritance, no session
 // persisted to disk - it only ever gets to return the JSON schema payload.
-function runClaudeExtraction(transcriptText) {
+function runClaudeExtraction(transcriptText, systemPrompt) {
   return new Promise((resolve, reject) => {
     const args = [
       "-p",
       "--system-prompt",
-      EXTRACTION_SYSTEM_PROMPT,
+      systemPrompt,
       "--output-format",
       "json",
       "--json-schema",
@@ -178,8 +188,8 @@ function runClaudeExtraction(transcriptText) {
   });
 }
 
-async function extractMemories(transcriptText) {
-  const stdout = await runClaudeExtraction(transcriptText);
+async function extractMemories(transcriptText, knownNames) {
+  const stdout = await runClaudeExtraction(transcriptText, buildExtractionSystemPrompt(knownNames));
   const result = JSON.parse(stdout);
   if (result.is_error) {
     throw new Error(`claude extraction error: ${result.result ?? "unknown"}`);
@@ -204,7 +214,8 @@ async function runCapture({ sessionId, transcriptPath, cwd }) {
   await ensureSchema();
 
   const project = detectProject(cwd);
-  const memories = await extractMemories(text.slice(-MAX_CHARS));
+  const knownNames = await listEntityNames(project);
+  const memories = await extractMemories(text.slice(-MAX_CHARS), knownNames);
 
   let added = 0;
   for (const entity of memories.entities ?? []) {
@@ -224,7 +235,8 @@ async function runCapture({ sessionId, transcriptPath, cwd }) {
   }
 
   writeState(sessionId, { lastLine: totalLines });
-  return { added };
+  recordCapture(project, added);
+  return { added, project };
 }
 
 // SessionEnd fires while Claude Code is tearing the process down, with a
@@ -306,14 +318,10 @@ async function main() {
   try {
     const { added } = await runCapture({ sessionId, transcriptPath, cwd });
 
-    if (eventName === "PreCompact") {
+    if (eventName === "PreCompact" && added > 0) {
       process.stdout.write(
         JSON.stringify({
-          hookSpecificOutput: {
-            hookEventName: "PreCompact",
-            additionalContext:
-              added > 0 ? `claude-neo4j: captured ${added} new memory observation(s) before compaction.` : "",
-          },
+          systemMessage: `\u{1f9e0} claude-neo4j: captured ${added} new memory observation(s) before compaction.`,
         })
       );
     } else {

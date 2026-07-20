@@ -26,14 +26,14 @@ Works against either:
 - **MCP server** (`neo4j-memory`) exposes tools Claude can call any time during
   a session: `memory_search`, `memory_get_entity`, `memory_recent`,
   `memory_add_observations`, `memory_create_relation`,
-  `memory_delete_observations`, `memory_delete_entity`, `memory_timeline`,
-  `memory_status`. The write tools (`memory_add_observations`,
+  `memory_delete_observations`, `memory_delete_entity`, `memory_prune`,
+  `memory_timeline`, `memory_status`. The write tools (`memory_add_observations`,
   `memory_create_relation`, `memory_delete_observations`,
-  `memory_delete_entity`) return a `confirmation` string that Claude relays as
-  a short line (e.g. "🧠 remembered 2 observation(s) on ...") so mid-session
-  writes aren't silent. Turn this off with `npm run memory -- mute` (persists
-  in `~/.claude-neo4j/config.json`) or `CLAUDE_NEO4J_QUIET=1` (session-only);
-  `npm run memory -- unmute` turns it back on.
+  `memory_delete_entity`, `memory_prune`) return a `confirmation` string that
+  Claude relays as a short line (e.g. "🧠 remembered 2 observation(s) on ...")
+  so mid-session writes aren't silent. Turn this off with `npm run memory --
+  mute` (persists in `~/.claude-neo4j/config.json`) or `CLAUDE_NEO4J_QUIET=1`
+  (session-only); `npm run memory -- unmute` turns it back on.
 - **`PreCompact`/`SessionEnd` hooks** read the new part of the transcript since
   the last capture and shell out to a locked-down, one-shot headless
   `claude -p` call (Haiku, no tools, no MCP servers, no settings/CLAUDE.md
@@ -42,11 +42,27 @@ Works against either:
   — a backstop for anything Claude didn't explicitly save with
   `memory_add_observations`. Because this runs through the `claude` CLI itself
   rather than the Anthropic SDK, it rides on your existing logged-in session
-  instead of needing a separate `ANTHROPIC_API_KEY`. Set
-  `CLAUDE_NEO4J_DISABLE_CAPTURE=1` to turn it off; everything else keeps
-  working either way.
+  instead of needing a separate `ANTHROPIC_API_KEY`. The extraction prompt is
+  seeded with the current project's existing entity names so it reuses them
+  instead of inventing near-duplicates, and a lexical-similarity check
+  (`src/lib/dedup.js`) catches any that still drift (typos, `-` vs `:`) before
+  a new entity gets created. Set `CLAUDE_NEO4J_DISABLE_CAPTURE=1` to turn it
+  off; everything else keeps working either way.
+- Because `SessionEnd`'s capture runs detached (see below) and `PreCompact`'s
+  confirmation may not survive to be seen, the next `SessionStart` banner
+  reports anything auto-capture saved in the background since your last
+  session ("Auto-capture also saved N observation(s) ...") so it's never
+  silent.
 - Recall uses Neo4j's built-in full-text indexes and relationship traversal —
   no embedding API, no vector store, no extra cost for search itself.
+  `memory_search` ranking blends full-text score with recency (a 30-day
+  half-life-ish decay), so a stale but lexically strong match doesn't always
+  outrank something you actually talked about recently.
+- **`memory_prune`** / `npm run memory -- prune` deletes observations older
+  than a given age (default 180 days), always keeping the most recent few per
+  entity regardless of age. Defaults to a dry run everywhere (CLI flag and MCP
+  tool) — nothing is deleted until you explicitly ask for it. Nothing prunes
+  automatically.
 
 All hook scripts fail open: if Neo4j is unreachable or unconfigured, they log
 to stderr and exit 0 without blocking your session.
@@ -178,14 +194,83 @@ the configure wizard against it using the credentials in `docker/.env`.
 ### Outside a Claude session
 
 - `npm run memory -- status` (or any subcommand: `search`, `recent`, `get`,
-  `add`, `relate`, `timeline`, `forget-obs`, `forget`, `mute`, `unmute`) —
-  query/edit the graph from a terminal. Run with no args for full usage.
+  `add`, `relate`, `timeline`, `forget-obs`, `forget`, `prune`, `projects`,
+  `mute`, `unmute`) — query/edit the graph from a terminal. Run with no args
+  for full usage. `npm run memory -- projects` lists every project tracked
+  anywhere in the db (not scoped to the current cwd), with entity/observation
+  counts and last activity — same data as `memory_list_projects` from inside a
+  session.
 - `scripts/check-health.sh` — verifies Docker container health, plugin config,
   Neo4j auth, and the MCP handshake in one shot.
 - A statusline showing `<model> · 🧠 <entities>e/<observations>o` can be wired
   via `scripts/statusline.mjs` (see `.claude/settings.local.json`).
 - The full graph is also browsable directly in Neo4j's own UI at
   `http://localhost:7474` (local mode) — no custom viewer needed.
+
+### Cypher-shell cheatsheet
+
+For poking at the graph directly (`cypher-shell -u neo4j -p <password>`, or
+paste into the Neo4j Browser at `http://localhost:7474`). All of these
+respect the graph model in [Graph model](#graph-model) above.
+
+```cypher
+// List every project tracked in the db, with entity/observation counts and
+// last activity (same data as `npm run memory -- projects` / memory_list_projects)
+MATCH (e:Entity) WHERE e.project IS NOT NULL
+OPTIONAL MATCH (o:Observation)-[:ABOUT]->(e)
+RETURN e.project AS project, count(DISTINCT e) AS entities, count(o) AS observations,
+       max(o.createdAt) AS lastActivity
+ORDER BY lastActivity DESC;
+
+// All entities for one project, with observation counts
+MATCH (e:Entity {project: "github.com/you/your-repo"})
+OPTIONAL MATCH (o:Observation)-[:ABOUT]->(e)
+RETURN e.name, e.type, count(o) AS observations
+ORDER BY observations DESC;
+
+// Full detail for one entity: every observation + every relation in/out
+MATCH (e:Entity {name: "user"})
+OPTIONAL MATCH (o:Observation)-[:ABOUT]->(e)
+OPTIONAL MATCH (e)-[r:RELATES_TO]-(other)
+RETURN e, collect(DISTINCT o) AS observations, collect(DISTINCT {type: r.type, entity: other.name}) AS relations;
+
+// Most recently created observations across all projects (recent activity feed)
+MATCH (o:Observation)-[:ABOUT]->(e:Entity)
+RETURN o.createdAt AS createdAt, e.project AS project, e.name AS entity, o.text AS text
+ORDER BY o.createdAt DESC
+LIMIT 25;
+
+// Whole relationship graph for one project (visualize in Neo4j Browser)
+MATCH (e:Entity {project: "github.com/you/your-repo"})
+OPTIONAL MATCH (e)-[r:RELATES_TO]-(other)
+RETURN e, r, other;
+
+// Sessions and how many observations each one produced
+MATCH (s:Session)
+OPTIONAL MATCH (s)-[:PRODUCED]->(o:Observation)
+RETURN s.id, s.project, s.startedAt, count(o) AS observationsProduced
+ORDER BY s.startedAt DESC;
+
+// Possible near-duplicate entity names within a project (eyeball before merging -
+// see `src/lib/dedup.js` for the automated version applied at write time)
+MATCH (a:Entity), (b:Entity)
+WHERE a.project = b.project AND a.name < b.name
+  AND (toLower(a.name) CONTAINS toLower(b.name) OR toLower(b.name) CONTAINS toLower(a.name))
+RETURN a.project, a.name, b.name;
+
+// Orphan entities with zero observations (candidates for cleanup)
+MATCH (e:Entity) WHERE NOT (e)<-[:ABOUT]-(:Observation)
+RETURN e.project, e.name, e.type;
+
+// Manually merge two duplicate entities (rewire b's observations/relations onto a, delete b)
+// Run only after confirming they really are the same thing.
+MATCH (a:Entity {project: "github.com/you/your-repo", name: "canonical-name"})
+MATCH (b:Entity {project: "github.com/you/your-repo", name: "duplicate-name"})
+MATCH (b)<-[:ABOUT]-(o:Observation)
+MERGE (o)-[:ABOUT]->(a)
+WITH a, b
+DETACH DELETE b;
+```
 
 ## Project layout
 
@@ -194,7 +279,8 @@ the configure wizard against it using the credentials in `docker/.env`.
 hooks/hooks.json             SessionStart / PreCompact / SessionEnd wiring
 .mcp.json                    bundled MCP server registration
 skills/                      memory-search, memory-status, timeline-report
-src/lib/                     config resolution, Neo4j client, schema, graph ops, project detection
+src/lib/                     config resolution, Neo4j client, schema, graph ops, project detection,
+                              entity-name dedup, cross-session capture digest
 src/mcp/server.js            MCP tools
 src/hooks/                   session-start.js, capture.js
 docker/                      docker-compose.yml for local Neo4j
@@ -214,3 +300,26 @@ CLAUDE.md                    current build status / continuation notes for this 
 - Switching from local to remote (or back) is just `npm run configure` again,
   or setting `NEO4J_URI`/`NEO4J_USERNAME`/`NEO4J_PASSWORD` env vars — no code
   changes.
+
+## Changelog
+
+Newest first. Kept brief — see `git log` for full detail.
+
+### 2026-07-20
+
+- Added a cypher-shell query cheatsheet to the README, plus `memory_list_projects`
+  / `npm run memory -- projects` to list every project tracked in the db.
+- Added `memory_prune` / `npm run memory -- prune` (dry-run by default) to
+  delete old observations while always keeping the most recent few per entity.
+- Added recency-weighted ranking to `memory_search` so stale-but-lexically-strong
+  matches don't always outrank recent ones.
+- Added a cross-session capture digest — the next `SessionStart` banner reports
+  what background auto-capture saved since your last session.
+- Added entity-name dedup: capture extraction reuses known project entity
+  names, backed by a lexical-similarity fallback (`src/lib/dedup.js`).
+- Fixed the `PreCompact` hook to emit `systemMessage` instead of an invalid
+  `hookSpecificOutput.additionalContext`, which was failing schema validation.
+- Added `scripts/migrate-from-claude-mem.mjs` (one-off, explicit-only) plus a
+  `SessionStart` hint suggesting it when unmigrated claude-mem data is found.
+- Documented the `docker/.env` vs `~/.claude-neo4j/config.json` credential
+  flow; gitignored `.claude/settings.local.json`.

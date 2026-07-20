@@ -137,6 +137,32 @@ server.tool(
 );
 
 server.tool(
+  "memory_prune",
+  "Delete observations older than a given age, keeping the most recent few per entity regardless of age. Defaults to a dry run (dryRun: true) - call it that way first, show the user the count and sample, and only call again with dryRun: false if they explicitly confirm. Never call with dryRun: false unprompted.",
+  {
+    olderThanDays: z.number().int().min(1).optional().describe("Delete observations older than this many days (default 180)"),
+    keepPerEntity: z.number().int().min(0).optional().describe("Always keep this many most-recent observations per entity (default 3)"),
+    dryRun: z.boolean().optional().describe("If true (default), report what would be deleted without deleting"),
+  },
+  async ({ olderThanDays, keepPerEntity, dryRun }) => {
+    try {
+      const result = await graph.pruneObservations({
+        project,
+        olderThanDays: olderThanDays ?? 180,
+        keepPerEntity: keepPerEntity ?? 3,
+        dryRun: dryRun ?? true,
+      });
+      if (!(dryRun ?? true) && shouldNotifyOnWrite()) {
+        result.confirmation = `pruned ${result.pruned} old observation(s)`;
+      }
+      return textResult(result);
+    } catch (error) {
+      return errorResult(error);
+    }
+  }
+);
+
+server.tool(
   "memory_timeline",
   "Fetch the chronological history of observations (optionally since a given ISO date), oldest first, scoped to the current project. Use for narrative timeline/digest reports of project history, not for point lookups.",
   {
@@ -146,6 +172,19 @@ server.tool(
   async ({ since, limit }) => {
     try {
       return textResult(await graph.getTimeline({ project, since, limit: limit ?? 300 }));
+    } catch (error) {
+      return errorResult(error);
+    }
+  }
+);
+
+server.tool(
+  "memory_list_projects",
+  "List every project tracked anywhere in the memory graph (not scoped to the current project), with entity/observation counts and last activity. Useful for 'what have you got memory for' questions.",
+  {},
+  async () => {
+    try {
+      return textResult(await graph.listProjects());
     } catch (error) {
       return errorResult(error);
     }
