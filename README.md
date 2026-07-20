@@ -117,6 +117,22 @@ Config resolution order at runtime: env vars (`NEO4J_URI`, `NEO4J_USERNAME`,
 Docker defaults. Env vars are handy for switching a single session to a
 different database without touching the saved config.
 
+**`docker/.env` vs `~/.claude-neo4j/config.json` — two separate files, synced
+once at setup time, not linked at runtime:**
+
+- `docker/.env` only feeds Docker. `docker compose` auto-loads a file named
+  `.env` sitting next to the `docker-compose.yml` it's running (hence `cd
+  docker && docker compose up -d`) and interpolates `NEO4J_USERNAME` /
+  `NEO4J_PASSWORD` / `NEO4J_HTTP_PORT` / `NEO4J_BOLT_PORT` from it into the
+  container's `NEO4J_AUTH` env var and port mappings.
+- `~/.claude-neo4j/config.json` is the file Claude actually reads (via
+  `src/lib/config.js`) to connect from hooks/MCP. `npm run configure` /
+  `scripts/setup-local.sh` populate it by copying the *same* values out of
+  `docker/.env` — that copy only happens once, at setup time.
+- If you change the password in `docker/.env` later, Claude won't pick it up
+  automatically — re-run `npm run configure` (or `scripts/setup-local.sh`) so
+  `~/.claude-neo4j/config.json` gets the new value too.
+
 ### 4. (Optional) disable automatic capture
 
 Automatic capture is on by default: `PreCompact`/`SessionEnd` shell out to a
