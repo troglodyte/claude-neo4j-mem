@@ -255,6 +255,49 @@ Totals: 5 project(s), 51 entities, 1041 observations, 57 relations
 The same per-project listing is available in-session as the
 `memory_list_projects` MCP tool, and as `npm run memory -- projects`.
 
+### Backup and restore
+
+The memory graph lives in a Docker volume, so it is the only copy of everything
+the plugin has learned. `npm run backup` snapshots it; `npm run restore` puts it
+back.
+
+```
+npm run backup                  # -> ~/.claude-neo4j/backups/neo4j-<timestamp>.dump
+npm run backup -- --keep 7      # afterwards, keep only the 7 newest
+npm run backup -- --list        # show existing backups
+
+npm run restore -- --latest     # restore the newest backup
+npm run restore -- --info FILE  # inspect an archive without restoring
+```
+
+Both use Neo4j's official `neo4j-admin database dump`/`load`, which capture the
+whole store — indexes and constraints included, not just the entities and
+observations the plugin models. That format cannot operate on a mounted
+database, so each script stops the container and restarts it afterwards
+**including when the dump fails or you interrupt it**. A backup takes about 13
+seconds.
+
+Restoring replaces the database. Before anything is touched, `restore.sh`
+verifies the archive's checksum, prints its metadata and the current entity and
+observation counts, and requires you to type the database name (`neo4j`) to
+confirm; `--force` skips the prompt. Afterwards it prints the restored counts,
+so a round trip is verified rather than assumed.
+
+Two limitations worth knowing:
+
+- **Local mode only.** A dump reads store files, so it cannot reach Neo4j Aura.
+  Use the provider's own snapshots for a remote database.
+- **Compression is off by default.** The `.dump` format is already
+  zstd-compressed internally: on a real 78-entity/1187-observation graph, `xz`
+  took 898KB down to 890KB — 0.9%. `--xz` is available if you are shipping the
+  archive somewhere that charges by the byte, and `restore.sh` detects
+  compressed input by content rather than by file extension.
+
+Each backup gets a `.sha256` sidecar. This is not decoration: `neo4j-admin
+load --info` parses only the archive header and will report a truncated dump as
+complete, so the sidecar is the only thing standing between a partial archive
+and a half-finished load over a database that has already been overwritten.
+
 ### Cypher-shell cheatsheet
 
 `scripts/cypher.sh "<query>"` runs arbitrary Cypher with no setup: it resolves

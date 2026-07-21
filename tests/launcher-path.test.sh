@@ -49,7 +49,7 @@ fi
 #    still refuse rather than operate on a bogus root.
 printf '#!/usr/bin/env bash\nexit 127\n' >"$SHIM/dirname"
 chmod +x "$SHIM/dirname"
-for script in memory-usage.sh check-health.sh setup-local.sh cypher.sh; do
+for script in memory-usage.sh check-health.sh setup-local.sh cypher.sh backup.sh restore.sh; do
   out="$(PATH="$SHIM:$PATH" bash "$REPO_ROOT/scripts/$script" 2>&1)"
   rc=$?
   if ((rc != 0)) && [[ $out == *"is not this repo"* ]]; then
