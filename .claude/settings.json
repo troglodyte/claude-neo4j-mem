@@ -1,0 +1,6 @@
+{
+  "_comment": "Work on this repo with scripts/claude-with-memory.sh, which passes --plugin-dir and loads the plugin live from the working tree. The marketplace-installed copy of the same plugin is a snapshot pinned to a git SHA, so it would both shadow local edits and register a second MCP server under the same name; disabling it here scopes that to this repo only. Deliberately contains no filesystem paths -- a directory marketplace source is normalized to an absolute path, which is not portable across machines.",
+  "enabledPlugins": {
+    "neo4j-memory@claude-neo4j-local": false
+  }
+}

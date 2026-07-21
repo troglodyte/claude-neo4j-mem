@@ -16,12 +16,30 @@ headless `claude -p` session with all 8 `memory_*` tools registering).
   Credentials are in `docker/.env` (gitignored).
 - **Plugin is configured**: `~/.claude-neo4j/config.json` points at that local
   container (mode: local).
-- **Plugin loads automatically for this repo** — registered via a local
-  marketplace in `.claude/settings.json` (`extraKnownMarketplaces` pointing at
-  `.claude-plugin/marketplace.json` in this repo + `enabledPlugins:
-  {"neo4j-memory@claude-neo4j-local": true}`). Just run `claude` from this
-  directory; `--plugin-dir` / `scripts/claude-with-memory.sh` are no longer
-  required (kept around as a fallback for loading it from elsewhere).
+- **Use `scripts/claude-with-memory.sh` to work on this repo** (corrected
+  2026-07-21 — the previous claim here, that a local marketplace in
+  `.claude/settings.json` made bare `claude` load this working tree, was
+  wrong, and hid the fact that every session was testing stale code):
+  - A **marketplace install is a snapshot copy** under
+    `~/.claude/plugins/cache/…`, pinned to a git SHA. It does not track the
+    working tree, whether it came from GitHub or from a `directory` source, so
+    local edits are invisible to it until it's reinstalled.
+  - **`--plugin-dir` is the only live mechanism.** `plugin.json`/`.mcp.json`
+    resolve `${CLAUDE_PLUGIN_ROOT}`, so pointing it at this repo runs the
+    working tree. `claude-with-memory.sh` derives that path from its own
+    location, which is why nothing here hardcodes a path.
+  - `~/.claude/settings.json` (user scope) registers the *same marketplace
+    name* `claude-neo4j-local` from **GitHub** with `autoUpdate: true`, and
+    user scope wins over the project-level entry — which is how a stale
+    snapshot silently shadowed local work for this repo.
+  - `.claude/settings.json` therefore just **disables** that installed copy for
+    this repo, so the `--plugin-dir` copy is the only one loaded and no second
+    MCP server registers under the same name. It deliberately contains no
+    paths: a `directory` marketplace source is normalized to an absolute path
+    (`./` is accepted then rewritten; `.` and `${CLAUDE_PROJECT_DIR}` are
+    rejected outright), so it can never be made portable.
+  - Verify with `claude plugin list`: inside this repo it should read
+    `disabled`; outside it, `enabled`.
 - **The memory graph now has real dogfooded content** (as of 2026-07-20) —
   this project's own build/debug history (3 entities, 10 observations after a
   dedup pass; see below). Test/smoke-test data is deliberately deleted after
