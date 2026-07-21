@@ -4,7 +4,7 @@ Claude Code plugin (`neo4j-memory`) giving Claude persistent, graph-based
 memory backed by Neo4j. Full architecture/usage docs: `README.md`. Portable
 cross-project guardrails: `AGENTS.md` (symlink).
 
-## Current status (as of 2026-07-20)
+## Current status (as of 2026-07-21)
 
 Fully built and verified end-to-end (Docker container smoke-tested, all Cypher
 queries exercised, MCP server driven by a real client, both hooks run with
@@ -97,11 +97,12 @@ headless `claude -p` session with all 8 `memory_*` tools registering).
   plugin/repo (created by different auto-capture runs inventing different
   names) into one canonical `project:claude-neo4j`, cutting 6 entities/31
   observations down to 3/10 with no loss of content.
-- **The repo is committed and pushed** (corrected 2026-07-21 — it previously
-  said nothing was committed, which stopped being true once the fixes below
-  landed). `origin` is `git@github.com:troglodyte/claude-neo4j-mem.git`; as of
-  2026-07-21 `main` is in sync with `origin/main` at `e2fbad5`. Commits still
-  happen only when explicitly requested.
+- **The repo is committed and pushed.** `origin` is
+  `git@github.com:troglodyte/claude-neo4j-mem.git`, and `main` tracks it.
+  Commits still happen only when explicitly requested. **Don't record the
+  current SHA here** — an earlier revision of this file pinned one and it was
+  stale within two commits, which is worse than no claim at all. Run
+  `git status -sb` instead; it is always right.
 
 ## Useful commands
 
@@ -255,18 +256,26 @@ Note `capture.js` exports `sweepPendingCaptures`/`pruneStaleState` for
 `session-start.js`, so its hook body is guarded by an entry-point check —
 importing it must not fire a capture.
 
-## Every *other* project is running a stale snapshot (found 2026-07-21)
+## Marketplace snapshots drift from the working tree (found 2026-07-21)
 
 The `.claude/settings.json` disable only covers **this** repo. Everywhere else,
-the user-scope marketplace install is enabled and serving a copy that predates
-all the 2026-07-21 fixes. Three layers were out of sync, and only the middle
-one auto-updates:
+the user-scope marketplace install is enabled and can serve a copy that
+predates the working tree. Three layers drift independently, and only the
+middle one auto-updates:
 
-| layer | path | state on 2026-07-21 |
+| layer | path | how to read its state |
 | --- | --- | --- |
-| GitHub `origin/main` | — | `e2fbad5`, current |
-| marketplace clone | `~/.claude/plugins/marketplaces/claude-neo4j-local` | `e2fbad5`, current |
-| **installed snapshot** | `~/.claude/plugins/cache/claude-neo4j-local/neo4j-memory/0.1.0` | pinned `54b36b6`, **stale** |
+| GitHub `origin/main` | — | `git ls-remote origin main` |
+| marketplace clone | `~/.claude/plugins/marketplaces/claude-neo4j-local` | `git -C <path> rev-parse --short HEAD` |
+| **installed snapshot** | `~/.claude/plugins/cache/claude-neo4j-local/neo4j-memory/<version>/` | `gitCommitSha` in `~/.claude/plugins/installed_plugins.json` |
+
+**Check those three rather than trusting a SHA written down here** — every
+recorded SHA in this file went stale within a day of being written, and a stale
+SHA presented as current is worse than no claim. The layers are expected to
+differ transiently: the clone only catches up when autoUpdate next runs, so
+right after a push `origin/main` is ahead of the clone, which is ahead of the
+snapshot. That is normal; what matters is whether the *snapshot* is missing
+code you depend on.
 
 `autoUpdate: true` refreshes the *clone*; it does not re-copy the clone into
 the cached install, so `installed_plugins.json` keeps its old `gitCommitSha`
@@ -274,7 +283,14 @@ and every non-this-repo session loads the old code. The snapshot is a plain
 copy, not a git checkout, so `git log` inside it fails — compare it with
 `diff -rq <snapshot>/src <clone>/src` instead.
 
-Symptoms, all confirmed in real sessions rather than inferred:
+Note the snapshot path contains the **version**, so a version bump changes it:
+after bumping to 0.2.0 the old `…/neo4j-memory/0.1.0/` directory is left behind
+and the live one is `…/0.2.0/`. Glob the version component rather than hardcoding
+it, or you will grep a directory nothing loads from.
+
+Symptoms observed when this bit on 2026-07-21 — kept as a worked example of
+what stale-snapshot failures look like, all confirmed in real sessions rather
+than inferred:
 
 - Captures in other repos time out at `90000ms` — the snapshot's
   `CAPTURE_TIMEOUT_MS = 90_000`, while HEAD has been `180_000` since `b94fecd`
@@ -288,11 +304,12 @@ Symptoms, all confirmed in real sessions rather than inferred:
 - No `escapeLuceneQuery` → their `<type>:<project>` entity searches return
   nothing.
 
-**`claude plugin update` cannot fix this** (tried 2026-07-21, it reported
-"already at the latest version (0.1.0)" and did nothing). It compares the
-`version` in `.claude-plugin/plugin.json`, which has been `0.1.0` since the
-plugin was created — so as long as the version is left alone, `update` is a
-permanent no-op no matter how far the snapshot drifts. There is no `--force`.
+**`claude plugin update` is a no-op unless the version changed** (tried
+2026-07-21 at `0.1.0`: it reported "already at the latest version (0.1.0)" and
+did nothing). It compares the `version` in `.claude-plugin/plugin.json`, so a
+version left alone means `update` never fires no matter how far the snapshot
+drifts, and there is no `--force`. **This is why the version gets bumped on
+every push other projects should pick up** — see the follow-ups below.
 
 What actually worked, at user scope:
 
@@ -301,22 +318,28 @@ claude plugin uninstall neo4j-memory@claude-neo4j-local --scope user
 claude plugin install   neo4j-memory@claude-neo4j-local --scope user
 ```
 
-That re-copied the clone (`gitCommitSha` went `54b36b6` → `e2fbad5`, and
-`diff -rq` against the clone is now empty). Verify with
-`grep CAPTURE_TIMEOUT_MS ~/.claude/plugins/cache/.../src/hooks/capture.js` —
-never with `claude plugin list`, which reports `0.1.0` either way and so
-cannot distinguish fresh from stale.
+That re-copied the clone and left `diff -rq` against it empty. Verify by
+diffing, or by grepping the snapshot for a symbol you know only exists in the
+new code — **never with `claude plugin list`**, which reports the version
+either way and so cannot distinguish fresh from stale.
 
-Two follow-ups this leaves open:
+Now that the version *does* move, `claude plugin update` should work; the
+uninstall/install pair remains the fallback for when the snapshot drifts within
+a single version.
+
+Follow-ups this leaves open:
 
 - **Bump `version` in `.claude-plugin/plugin.json` on every push** that other
-  projects should pick up, otherwise the reinstall dance is the only path and
-  nothing will prompt you to run it.
-- The **project-scope** record in `installed_plugins.json` still reads
-  `ec11886` (2026-07-17). Harmless today — it shares the now-fresh
-  `installPath` with the user-scope entry, and this repo is `disabled` at both
-  scopes and loads via `--plugin-dir` regardless — but it is a second stale
-  `gitCommitSha` that will mislead anyone reading that file.
+  projects should pick up (`package.json` carries the same number; keep them
+  together). Otherwise the reinstall dance is the only path and nothing will
+  prompt you to run it.
+- The **project-scope** record in `installed_plugins.json` carries its own,
+  older `gitCommitSha`. Harmless — it shares an `installPath` with the
+  user-scope entry, and this repo is `disabled` at both scopes and loads via
+  `--plugin-dir` regardless — but it will mislead anyone reading that file.
+- After a version bump, the previous version's directory is orphaned under
+  `~/.claude/plugins/cache/claude-neo4j-local/neo4j-memory/`. Nothing loads it;
+  delete it if it is confusing you.
 
 ## Likely next steps
 
