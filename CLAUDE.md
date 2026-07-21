@@ -118,6 +118,17 @@ headless `claude -p` session with all 8 `memory_*` tools registering).
   every project in the db with entity/observation counts, first-seen, obs in
   last 7 days, last activity, plus totals and hygiene warnings (duplicate
   project names, oversized entities, empty stubs). `--quiet` for table only.
+- `npm run backup` / `npm run restore -- --latest` — snapshot and reinstate the
+  whole database via `neo4j-admin database dump`/`load`, run in a sibling
+  container against the stopped container's volume (`--volumes-from`). Local
+  mode only; both stop and restart the container, via a trap that fires on
+  failure and Ctrl-C too. `--keep N` prunes old backups, `--info` inspects an
+  archive, restore requires typing the database name unless `--force`.
+  **Compression is deliberately off**: the `.dump` is already zstd-compressed,
+  and xz measured 0.9% on the real graph — `--xz` exists but is near-pointless.
+  Each backup gets a `.sha256` sidecar because `load --info` reads only the
+  archive header and passes a truncated dump as valid (verified). Shared
+  plumbing is in `scripts/lib-backup.sh`.
 - `scripts/cypher.sh "<query>"` — run arbitrary Cypher. Resolves credentials
   automatically and borrows `cypher-shell` from inside the container in local
   mode, so **no install is needed**; only remote-mode hosts need the binary.

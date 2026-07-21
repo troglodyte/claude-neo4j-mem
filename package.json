@@ -10,6 +10,8 @@
     "mcp-server": "node src/mcp/server.js",
     "memory": "node scripts/memory-cli.mjs",
     "usage": "bash scripts/memory-usage.sh",
+    "backup": "bash scripts/backup.sh",
+    "restore": "bash scripts/restore.sh",
     "token-cost": "node scripts/token-cost.mjs",
     "migrate-claude-mem": "node scripts/migrate-from-claude-mem.mjs"
   },
