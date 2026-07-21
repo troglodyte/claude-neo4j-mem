@@ -5,6 +5,7 @@
   "type": "module",
   "private": true,
   "scripts": {
+    "test": "bash tests/launcher-path.test.sh",
     "configure": "node scripts/configure.mjs",
     "mcp-server": "node src/mcp/server.js",
     "memory": "node scripts/memory-cli.mjs",

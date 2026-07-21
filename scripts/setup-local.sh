@@ -5,7 +5,16 @@
 # Usage: ./scripts/setup-local.sh   (or from repo root: scripts/setup-local.sh)
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Resolved in two steps and checked: as a single `cd "$(dirname X)/.."` this
+# degrades to "/" when the substitution yields nothing, and set -e can't see it.
+# The `|| =""` keeps set -e from aborting here with a bare "cd: null directory",
+# so the explanatory check below is what the user actually sees.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)" || SCRIPT_DIR=""
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)" || REPO_ROOT=""
+[ -f "$REPO_ROOT/.claude-plugin/plugin.json" ] || {
+  echo "setup-local.sh: resolved repo root '$REPO_ROOT' is not this repo" >&2
+  exit 1
+}
 cd "$REPO_ROOT"
 
 if ! command -v docker >/dev/null 2>&1; then

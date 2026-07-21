@@ -5,7 +5,14 @@
 # Usage: scripts/check-health.sh
 set -uo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Resolved in two steps and checked: as a single `cd "$(dirname X)/.."` this
+# degrades to "/" when the substitution yields nothing, and set -e can't see it.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
+[ -f "$REPO_ROOT/.claude-plugin/plugin.json" ] || {
+  echo "check-health.sh: resolved repo root '$REPO_ROOT' is not this repo" >&2
+  exit 1
+}
 cd "$REPO_ROOT"
 
 FAILURES=0

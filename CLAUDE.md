@@ -28,6 +28,21 @@ headless `claude -p` session with all 8 `memory_*` tools registering).
     resolve `${CLAUDE_PLUGIN_ROOT}`, so pointing it at this repo runs the
     working tree. `claude-with-memory.sh` derives that path from its own
     location, which is why nothing here hardcodes a path.
+  - **A bad `--plugin-dir` starts a memory-less session silently** (found and
+    fixed 2026-07-21). Claude Code accepts `--plugin-dir /` without any error
+    or warning, so the *only* symptom is the missing `SessionStart` banner —
+    the session otherwise looks completely normal, and several ran that way
+    before it was noticed. The launcher was degrading to exactly that:
+    `cd "$(dirname X)/.."` collapses to `cd /..` → `/` whenever the inner
+    substitution yields nothing, and `set -euo pipefail` cannot catch it (the
+    inner failure is swallowed by the substitution, and `cd /` then succeeds).
+    All five `scripts/*.sh` now resolve in two steps and assert the resolved
+    root contains `.claude-plugin/plugin.json`, refusing to run otherwise;
+    `npm test` (`tests/launcher-path.test.sh`) fails against the old form.
+    To check a *running* session: `tr '\0' ' ' < /proc/<pid>/cmdline` shows the
+    real argv, and `pgrep -P <pid>` should list an `src/mcp/server.js` child —
+    if it doesn't, the plugin never loaded. Per-session MCP logs live in
+    `~/.cache/claude-cli-nodejs/<escaped-cwd>/mcp-logs-plugin-neo4j-memory-neo4j-memory/`.
   - `~/.claude/settings.json` (user scope) registers the *same marketplace
     name* `claude-neo4j-local` from **GitHub** with `autoUpdate: true`, and
     user scope wins over the project-level entry — which is how a stale
@@ -82,12 +97,17 @@ headless `claude -p` session with all 8 `memory_*` tools registering).
   plugin/repo (created by different auto-capture runs inventing different
   names) into one canonical `project:claude-neo4j`, cutting 6 entities/31
   observations down to 3/10 with no loss of content.
-- Nothing in this repo is committed to git yet (all untracked, by design —
-  commits happen only when explicitly requested).
+- **The repo is committed and pushed** (corrected 2026-07-21 — it previously
+  said nothing was committed, which stopped being true once the fixes below
+  landed). `origin` is `git@github.com:troglodyte/claude-neo4j-mem.git`; as of
+  2026-07-21 `main` is in sync with `origin/main` at `e2fbad5`. Commits still
+  happen only when explicitly requested.
 
 ## Useful commands
 
 - `scripts/claude-with-memory.sh` — launch Claude Code with this plugin loaded.
+- `npm test` — guards `scripts/*.sh` against silently resolving the plugin
+  directory to `/` (see the launcher notes above).
 - `scripts/setup-local.sh` — idempotent: starts the local container if needed,
   waits for health, and (re)runs the configure wizard against it.
 - `npm run configure` / `node scripts/configure.mjs --mode ... --uri ...` —
@@ -223,6 +243,69 @@ headroom, not expected duration: 180s detached, 80s inline.
 Note `capture.js` exports `sweepPendingCaptures`/`pruneStaleState` for
 `session-start.js`, so its hook body is guarded by an entry-point check —
 importing it must not fire a capture.
+
+## Every *other* project is running a stale snapshot (found 2026-07-21)
+
+The `.claude/settings.json` disable only covers **this** repo. Everywhere else,
+the user-scope marketplace install is enabled and serving a copy that predates
+all the 2026-07-21 fixes. Three layers were out of sync, and only the middle
+one auto-updates:
+
+| layer | path | state on 2026-07-21 |
+| --- | --- | --- |
+| GitHub `origin/main` | — | `e2fbad5`, current |
+| marketplace clone | `~/.claude/plugins/marketplaces/claude-neo4j-local` | `e2fbad5`, current |
+| **installed snapshot** | `~/.claude/plugins/cache/claude-neo4j-local/neo4j-memory/0.1.0` | pinned `54b36b6`, **stale** |
+
+`autoUpdate: true` refreshes the *clone*; it does not re-copy the clone into
+the cached install, so `installed_plugins.json` keeps its old `gitCommitSha`
+and every non-this-repo session loads the old code. The snapshot is a plain
+copy, not a git checkout, so `git log` inside it fails — compare it with
+`diff -rq <snapshot>/src <clone>/src` instead.
+
+Symptoms, all confirmed in real sessions rather than inferred:
+
+- Captures in other repos time out at `90000ms` — the snapshot's
+  `CAPTURE_TIMEOUT_MS = 90_000`, while HEAD has been `180_000` since `b94fecd`
+  (11:00). A timeout logged at 15:41 for a `feral-processes` session is what
+  exposed this; a stale-code timeout is indistinguishable from a real one in
+  `capture.log`, so **check the timeout value in the message, not just the
+  failure**.
+- The snapshot has no `src/lib/budget.js`, so other projects still pay the
+  pre-budget read costs (~60k tokens for a default `memory_timeline`).
+- No `sweepPendingCaptures` → their failed captures stay unrecoverable.
+- No `escapeLuceneQuery` → their `<type>:<project>` entity searches return
+  nothing.
+
+**`claude plugin update` cannot fix this** (tried 2026-07-21, it reported
+"already at the latest version (0.1.0)" and did nothing). It compares the
+`version` in `.claude-plugin/plugin.json`, which has been `0.1.0` since the
+plugin was created — so as long as the version is left alone, `update` is a
+permanent no-op no matter how far the snapshot drifts. There is no `--force`.
+
+What actually worked, at user scope:
+
+```
+claude plugin uninstall neo4j-memory@claude-neo4j-local --scope user
+claude plugin install   neo4j-memory@claude-neo4j-local --scope user
+```
+
+That re-copied the clone (`gitCommitSha` went `54b36b6` → `e2fbad5`, and
+`diff -rq` against the clone is now empty). Verify with
+`grep CAPTURE_TIMEOUT_MS ~/.claude/plugins/cache/.../src/hooks/capture.js` —
+never with `claude plugin list`, which reports `0.1.0` either way and so
+cannot distinguish fresh from stale.
+
+Two follow-ups this leaves open:
+
+- **Bump `version` in `.claude-plugin/plugin.json` on every push** that other
+  projects should pick up, otherwise the reinstall dance is the only path and
+  nothing will prompt you to run it.
+- The **project-scope** record in `installed_plugins.json` still reads
+  `ec11886` (2026-07-17). Harmless today — it shares the now-fresh
+  `installPath` with the user-scope entry, and this repo is `disabled` at both
+  scopes and loads via `--plugin-dir` regardless — but it is a second stale
+  `gitCommitSha` that will mislead anyone reading that file.
 
 ## Likely next steps
 
