@@ -413,6 +413,32 @@ CLAUDE.md                    current build status / continuation notes for this 
 
 Newest first. Kept brief — see `git log` for full detail.
 
+### 0.2.0 — 2026-07-21
+
+First version bump since the plugin was created. Marketplace installs compare
+this number, so everything landed since `0.1.0` only reaches other projects
+now — see the snapshot-drift notes in `CLAUDE.md`.
+
+- Added `npm run backup` / `npm run restore` (`scripts/backup.sh`,
+  `scripts/restore.sh`) — full `neo4j-admin` dump/load of the local database,
+  with checksum-verified archives, a confirm-by-name restore prompt, and
+  `--keep N` retention. Local mode only.
+- **Breaking:** `getTimeline` returns `{total, returned, truncated}` rather
+  than a bare array, from the token-budget work.
+- Added per-read-path character budgets (`src/lib/budget.js`), cutting a
+  default `memory_timeline` from ~60k tokens to ~8k, plus `npm run token-cost`
+  to catch regressions.
+- Fixed `memory_search` returning an entity's newest observations instead of
+  the ones that actually matched, and escaped Lucene syntax so entity names
+  like `feature:capture-visibility` are findable.
+- Capped `memory_get_entity` at the 50 newest observations by default.
+- Made auto-capture recoverable (failed captures retry from `SessionStart`)
+  and widened its window from 15k to 50k characters across up to 3 chunks.
+- Rewrote `scripts/migrate-from-claude-mem.mjs` to map project scope onto the
+  git-remote identifier and split observations by claude-mem's `type`.
+- Hardened all `scripts/*.sh` against resolving the plugin directory to `/`,
+  which silently started memory-less sessions; guarded by `npm test`.
+
 ### 2026-07-20
 
 - Added a cypher-shell query cheatsheet to the README, plus `memory_list_projects`
