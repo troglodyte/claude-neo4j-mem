@@ -8,6 +8,7 @@ import { upsertSession, getRecentContext, getStatus } from "../lib/graph.js";
 import { closeDriver, verifyConnectivity } from "../lib/neo4jClient.js";
 import { isConfigured } from "../lib/config.js";
 import { consumeCaptureDigest } from "../lib/captureDigest.js";
+import { sweepPendingCaptures, pruneStaleState } from "./capture.js";
 
 const CLAUDE_MEM_DB = path.join(homedir(), ".claude-mem", "claude-mem.db");
 
@@ -103,6 +104,16 @@ async function main() {
     if (digest) {
       systemMessage += ` (Auto-capture also saved ${digest.added} observation(s) in the background since your last session.)`;
     }
+
+    // A capture that died has no other trigger to retry it - the session it
+    // belonged to is over - so session start is where stranded work resumes.
+    // Reported rather than silent: a failed capture means a past session's
+    // memory is missing, which the user can't otherwise tell.
+    const retried = sweepPendingCaptures();
+    if (retried > 0) {
+      systemMessage += ` Retrying ${retried} capture(s) that failed earlier; results land in ~/.claude-neo4j/capture.log.`;
+    }
+    pruneStaleState();
 
     process.stdout.write(
       JSON.stringify({

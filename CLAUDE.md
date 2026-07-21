@@ -172,6 +172,40 @@ summarizes a silently-shortened history. Measured on `prehire-insight`:
 ceiling and exits non-zero if one regresses. Run it after changing anything
 that shapes a read payload.
 
+## Auto-capture reliability and coverage (2026-07-21)
+
+Three problems, all found by measuring rather than reading:
+
+- **Failed captures were unrecoverable.** The detached worker's `finally`
+  deleted its input file unconditionally, including on failure — destroying the
+  only artifact a retry could use, even though `lastLine` only advances on
+  success (so a retry would have been correct). 3 of 21 sessions had died this
+  way, visible only in `capture.log`. Failed inputs are now kept with an
+  attempt counter (up to 3), `sweepPendingCaptures()` relaunches them from
+  `SessionStart` — the only trigger left once a session is over — and the
+  banner says when it does. Files younger than 10 minutes are skipped so an
+  in-flight worker isn't double-run.
+- **Capture only ever saw a session's tail.** `text.slice(-15000)` dropped 66%
+  of extractable content across real captured sessions (89% for the worst), and
+  `lastLine == totalLines` in every case proved PreCompact never chunked them —
+  most sessions end without compacting. The window is now 50k chars with up to
+  3 chunks (`CLAUDE_NEO4J_CAPTURE_WINDOW`, `CLAUDE_NEO4J_CAPTURE_MAX_CHUNKS`),
+  taken from the end so overflow drops the oldest content, and what was dropped
+  is logged. PreCompact stays at one window since it runs inline against a 100s
+  hook timeout.
+- **Writes were DB-wasteful.** `addObservations` opened a session and then
+  called `listEntityNames` *inside* it — a nested session plus a full re-scan of
+  every entity name, per entity. An 8-entity capture cost 16 sessions, 24
+  queries and 16 config-file reads; it now costs 9 sessions, 17 queries and 1
+  read. Callers writing several entities pass `existingNames` once.
+
+Extraction measures ~11s for a full 50k window, so timeouts are outlier
+headroom, not expected duration: 180s detached, 80s inline.
+
+Note `capture.js` exports `sweepPendingCaptures`/`pruneStaleState` for
+`session-start.js`, so its hook body is guarded by an entry-point check —
+importing it must not fire a capture.
+
 ## Likely next steps
 
 - Actually use it in a session or two so `memory_add_observations` /

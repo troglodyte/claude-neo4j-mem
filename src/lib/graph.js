@@ -56,16 +56,21 @@ export async function upsertSession({ id, cwd, project }) {
   });
 }
 
-export async function addObservations({ entity, entityType, observations, sessionId, project }) {
+// `existingNames` lets a caller writing several entities in a row fetch the
+// name list once instead of per call. It used to be fetched inside the session
+// below - a nested session acquisition plus a full re-scan of every entity name
+// on each call, so one 8-entity capture opened 16 sessions and ran the same
+// scan 8 times.
+export async function addObservations({ entity, entityType, observations, sessionId, project, existingNames }) {
   // Bounded on the way in, so one runaway observation can't inflate every
   // future read that touches this entity.
   const rows = observations.map((text) => ({
     id: randomUUID(),
     text: truncateText(text, BUDGETS.writeTextChars),
   }));
+  const names = existingNames ?? (await listEntityNames(project));
+  entity = resolveCanonicalName(entity, names);
   await withSession(async (session) => {
-    const existingNames = await listEntityNames(project);
-    entity = resolveCanonicalName(entity, existingNames);
     await upsertEntity(session, entity, entityType, project);
     await session.run(
       `MATCH (e:Entity {name: $entity})

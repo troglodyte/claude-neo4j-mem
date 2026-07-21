@@ -14,11 +14,19 @@ function readConfigFile() {
   }
 }
 
+// withSession() resolves the connection on every session it opens, which meant
+// re-reading and re-parsing config.json from disk dozens of times per capture.
+// Connection details can't change under a running process (writeConfigFile
+// clears this), unlike notifyOnWrite, which stays uncached so `memory -- mute`
+// takes effect on an already-running MCP server.
+let connectionCache;
+
 /**
  * Resolution order: env vars > ~/.claude-neo4j/config.json > local Docker defaults.
  * Env vars let per-project .mcp.json / CI overrides win without touching the shared file.
  */
 export function loadConnectionConfig() {
+  if (connectionCache) return connectionCache;
   const fileConfig = readConfigFile() ?? {};
 
   const uri = process.env.NEO4J_URI ?? fileConfig.uri ?? "bolt://localhost:7687";
@@ -33,7 +41,8 @@ export function loadConnectionConfig() {
     );
   }
 
-  return { uri, username, password, database, mode };
+  connectionCache = { uri, username, password, database, mode };
+  return connectionCache;
 }
 
 /**
@@ -62,6 +71,7 @@ export function isConfigured() {
 }
 
 export function writeConfigFile(config) {
+  connectionCache = undefined;
   fs.mkdirSync(CONFIG_DIR, { recursive: true });
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), { mode: 0o600 });
 }

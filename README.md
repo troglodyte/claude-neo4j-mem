@@ -162,6 +162,18 @@ CLI it shells out to with `CLAUDE_NEO4J_CAPTURE_CLI`. To turn it off:
 export CLAUDE_NEO4J_DISABLE_CAPTURE=1
 ```
 
+Each capture reads up to `CLAUDE_NEO4J_CAPTURE_WINDOW` characters (default
+50,000) of new transcript, and covers longer sessions with up to
+`CLAUDE_NEO4J_CAPTURE_MAX_CHUNKS` windows (default 3) taken from the end — so a
+session past the ceiling loses its oldest content, not its most recent, and
+`~/.claude-neo4j/capture.log` records how much was dropped. Raise either to
+trade tokens for coverage, or lower them to spend less.
+
+A capture that fails (Neo4j restarting, a timed-out extraction) keeps its input
+and is retried at the next session start, up to 3 attempts — transcripts stay on
+disk, so a capture that failed days ago still works when it finally runs. The
+session-start banner tells you when a retry is happening.
+
 ### 5. Load the plugin
 
 ```bash
