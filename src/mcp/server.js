@@ -35,11 +35,11 @@ server.tool(
 
 server.tool(
   "memory_get_entity",
-  "Get full detail for one entity: all of its observations plus all incoming and outgoing relations to other entities.",
-  { name: z.string() },
-  async ({ name }) => {
+  "Get detail for one entity: its most recent observations plus all incoming and outgoing relations to other entities. Observations are capped (default 50, newest first) since an entity's history can be arbitrarily long; `observationCount` reports the true total, so raise `limit` if you need more than what came back.",
+  { name: z.string(), limit: z.number().int().positive().optional().describe("Max observations to return (default 50, newest first)") },
+  async ({ name, limit }) => {
     try {
-      const entity = await graph.getEntity(name, project);
+      const entity = await graph.getEntity(name, project, { limit: limit ?? 50 });
       return textResult(entity ?? { error: `no entity named "${name}"` });
     } catch (error) {
       return errorResult(error);
@@ -164,14 +164,14 @@ server.tool(
 
 server.tool(
   "memory_timeline",
-  "Fetch the chronological history of observations (optionally since a given ISO date), oldest first, scoped to the current project. Use for narrative timeline/digest reports of project history, not for point lookups.",
+  "Fetch the chronological history of observations (optionally since a given ISO date), oldest first, scoped to the current project. Use for narrative timeline/digest reports of project history, not for point lookups. Each entry's text is abridged to its opening ~200 characters, which is what narrative summarization needs; returns {events, total, returned, truncated}. When `truncated` is true, walk the history in date windows with `since` rather than raising `limit` - a full history can run to tens of thousands of tokens in one response.",
   {
     since: z.string().optional().describe("ISO 8601 date/time; only observations at or after this point are returned"),
-    limit: z.number().int().min(1).max(2000).optional(),
+    limit: z.number().int().min(1).max(500).optional().describe("Max events to return (default 100)"),
   },
   async ({ since, limit }) => {
     try {
-      return textResult(await graph.getTimeline({ project, since, limit: limit ?? 300 }));
+      return textResult(await graph.getTimeline({ project, since, limit: limit ?? 100 }));
     } catch (error) {
       return errorResult(error);
     }

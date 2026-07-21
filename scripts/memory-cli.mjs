@@ -61,6 +61,10 @@ function printEntity(e) {
   for (const r of e.incoming ?? []) {
     console.log(`  <- ${r.type} <- ${r.entity}`);
   }
+  const shown = (e.observations ?? []).length;
+  if (e.observationCount !== undefined && e.observationCount > shown) {
+    console.log(`  ... showing ${shown} of ${e.observationCount} observations (most recent first)`);
+  }
 }
 
 async function main() {
@@ -131,10 +135,19 @@ async function main() {
       break;
     }
     case "timeline": {
-      const events = await graph.getTimeline({ project, since: flags.since, limit: limit ?? 300 });
+      const { events, total, returned, truncated } = await graph.getTimeline({
+        project,
+        since: flags.since,
+        limit: limit ?? 100,
+      });
       if (events.length === 0) console.log("No timeline events.");
       for (const e of events) {
         console.log(`${e.createdAt}  ${e.entity}${e.type ? ` (${e.type})` : ""}: ${e.text}`);
+      }
+      if (truncated) {
+        console.log(
+          `\n... showing ${returned} of ${total} events. Narrow with --since DATE, or raise --limit (costs more).`
+        );
       }
       break;
     }

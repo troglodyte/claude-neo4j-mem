@@ -1,6 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { withSession, int } from "./neo4jClient.js";
 import { resolveCanonicalName } from "./dedup.js";
+import { BUDGETS, truncateText, fitToBudget } from "./budget.js";
+
+// Callers search with plain phrases and with entity names, and this plugin's
+// naming convention puts Lucene syntax characters right in those names
+// ("feature:capture-visibility"). Unescaped, Lucene reads the colon as a field
+// separator and the hyphen as negation, so searching for an entity by its own
+// name parsed as a query against a nonexistent field and silently returned
+// nothing. Escaping trades wildcard support for queries that mean what they say.
+const LUCENE_SPECIAL = /([+\-!(){}[\]^"~*?:\\/&|])/g;
+
+function escapeLuceneQuery(query) {
+  return query.replace(LUCENE_SPECIAL, "\\$1");
+}
 
 // Cypher can't match a literal `null` in a property map (MERGE {project: null}
 // never finds an existing node, since equality against null is always
@@ -44,7 +57,12 @@ export async function upsertSession({ id, cwd, project }) {
 }
 
 export async function addObservations({ entity, entityType, observations, sessionId, project }) {
-  const rows = observations.map((text) => ({ id: randomUUID(), text }));
+  // Bounded on the way in, so one runaway observation can't inflate every
+  // future read that touches this entity.
+  const rows = observations.map((text) => ({
+    id: randomUUID(),
+    text: truncateText(text, BUDGETS.writeTextChars),
+  }));
   await withSession(async (session) => {
     const existingNames = await listEntityNames(project);
     entity = resolveCanonicalName(entity, existingNames);
@@ -107,18 +125,38 @@ export async function searchMemory(query, limit = 10, project = null) {
          END AS rankScore
        ORDER BY rankScore DESC
        LIMIT $limit
+       // Pull the observations that actually matched the query, best first.
+       // Without this the entity's newest observations were returned instead,
+       // so a hit buried in a large entity's history was scored but never shown.
+       CALL {
+         WITH entity
+         CALL db.index.fulltext.queryNodes('observationTextFulltext', $query) YIELD node, score AS obsScore
+         MATCH (node)-[:ABOUT]->(entity)
+         RETURN node.text AS text
+         ORDER BY obsScore DESC
+         LIMIT 5
+       }
+       WITH entity, rankScore, collect(text) AS matched
+       // Top up with recent observations so an entity matched only by name
+       // (or by fewer than five observations) still comes back with context.
        OPTIONAL MATCH (o:Observation)-[:ABOUT]->(entity)
-       WITH entity, rankScore, o
+       WITH entity, rankScore, matched, o
        ORDER BY o.createdAt DESC
-       WITH entity, rankScore, collect(o.text)[0..5] AS observations
+       WITH entity, rankScore, matched, collect(o.text) AS recent
+       WITH entity, rankScore,
+            (matched + [t IN recent WHERE NOT t IN matched])[0..5] AS observations
        OPTIONAL MATCH (entity)-[r:RELATES_TO]-(other)
        WITH entity, rankScore, observations, collect(DISTINCT CASE WHEN r IS NULL THEN NULL ELSE {type: r.type, entity: other.name} END) AS relationsRaw
        WITH entity, rankScore, observations, [x IN relationsRaw WHERE x IS NOT NULL] AS relations
        RETURN entity.name AS name, entity.type AS type, rankScore AS score, observations, relations
        ORDER BY rankScore DESC`,
-      { query, limit: int(limit), project: project ?? null }
+      { query: escapeLuceneQuery(query), limit: int(limit), project: project ?? null }
     );
-    return result.records.map((r) => r.toObject());
+    const rows = result.records.map((r) => {
+      const row = r.toObject();
+      return { ...row, observations: row.observations.map((t) => truncateText(t, BUDGETS.searchTextChars)) };
+    });
+    return fitToBudget(rows, BUDGETS.searchTotalChars).kept;
   });
 }
 
@@ -132,24 +170,38 @@ const RESOLVE_ENTITY_MATCH = `MATCH (e:Entity {name: $name})
        WITH e ORDER BY CASE WHEN e.project = $project THEN 0 ELSE 1 END
        LIMIT 1`;
 
-export async function getEntity(name, project = null) {
+// Observations are capped because an entity's history is unbounded: a bulk
+// import left one entity holding 711 observations / ~460k characters, and
+// returning all of them put ~115k tokens into the caller's context in a single
+// call. The full count is always reported so callers can tell they're seeing a
+// window, and `limit: null` still returns everything for deliberate exports.
+export async function getEntity(name, project = null, { limit = 50 } = {}) {
   return withSession(async (session) => {
     const result = await session.run(
       `${RESOLVE_ENTITY_MATCH}
        OPTIONAL MATCH (o:Observation)-[:ABOUT]->(e)
        WITH e, o ORDER BY o.createdAt DESC
        WITH e, collect(CASE WHEN o IS NULL THEN NULL ELSE {id: o.id, text: o.text, createdAt: toString(o.createdAt)} END) AS observationsRaw
-       WITH e, [x IN observationsRaw WHERE x IS NOT NULL] AS observations
+       WITH e, [x IN observationsRaw WHERE x IS NOT NULL] AS allObservations
+       WITH e, allObservations, size(allObservations) AS observationCount
+       WITH e, observationCount,
+            CASE WHEN $limit IS NULL THEN allObservations ELSE allObservations[0..$limit] END AS observations
        OPTIONAL MATCH (e)-[r:RELATES_TO]->(out)
-       WITH e, observations, collect(DISTINCT CASE WHEN r IS NULL THEN NULL ELSE {type: r.type, entity: out.name} END) AS outgoingRaw
-       WITH e, observations, [x IN outgoingRaw WHERE x IS NOT NULL] AS outgoing
+       WITH e, observations, observationCount, collect(DISTINCT CASE WHEN r IS NULL THEN NULL ELSE {type: r.type, entity: out.name} END) AS outgoingRaw
+       WITH e, observations, observationCount, [x IN outgoingRaw WHERE x IS NOT NULL] AS outgoing
        OPTIONAL MATCH (e)<-[r2:RELATES_TO]-(in)
-       WITH e, observations, outgoing, collect(DISTINCT CASE WHEN r2 IS NULL THEN NULL ELSE {type: r2.type, entity: in.name} END) AS incomingRaw
-       WITH e, observations, outgoing, [x IN incomingRaw WHERE x IS NOT NULL] AS incoming
-       RETURN e.name AS name, e.type AS type, e.project AS project, observations, outgoing, incoming`,
-      { name, project: project ?? null }
+       WITH e, observations, observationCount, outgoing, collect(DISTINCT CASE WHEN r2 IS NULL THEN NULL ELSE {type: r2.type, entity: in.name} END) AS incomingRaw
+       WITH e, observations, observationCount, outgoing, [x IN incomingRaw WHERE x IS NOT NULL] AS incoming
+       RETURN e.name AS name, e.type AS type, e.project AS project, observations, observationCount, outgoing, incoming`,
+      { name, project: project ?? null, limit: limit === null ? null : int(limit) }
     );
-    return result.records[0]?.toObject() ?? null;
+    const entity = result.records[0]?.toObject() ?? null;
+    if (!entity) return null;
+    const observations = entity.observations.map((o) => ({
+      ...o,
+      text: truncateText(o.text, BUDGETS.entityTextChars),
+    }));
+    return { ...entity, observations: fitToBudget(observations, BUDGETS.entityTotalChars).kept };
   });
 }
 
@@ -166,7 +218,13 @@ export async function getRecentContext({ project, limit = 15 }) {
        ORDER BY lastSeen DESC`,
       { project: project ?? null, limit: int(limit) }
     );
-    return result.records.map((r) => r.toObject());
+    // This is the SessionStart injection, paid once per session on every
+    // session, so it gets the tightest budget of any read path.
+    const rows = result.records.map((r) => {
+      const row = r.toObject();
+      return { ...row, observations: row.observations.map((t) => truncateText(t, BUDGETS.recentTextChars)) };
+    });
+    return fitToBudget(rows, BUDGETS.recentTotalChars).kept;
   });
 }
 
@@ -195,8 +253,30 @@ export async function deleteEntity(entity, project = null) {
   });
 }
 
-export async function getTimeline({ project, since, limit = 300 }) {
+/**
+ * Chronological observation history. Returns {events, total, returned,
+ * truncated} rather than a bare array: callers summarize the result, and
+ * summarizing a silently-trimmed history produces a confidently incomplete
+ * narrative. `total` is the true match count so the caller can page with
+ * `since` instead of raising `limit` and paying for the whole history at once.
+ */
+export async function getTimeline({
+  project,
+  since,
+  limit = 100,
+  maxTextChars = BUDGETS.timelineTextChars,
+  maxTotalChars = BUDGETS.timelineTotalChars,
+} = {}) {
   return withSession(async (session) => {
+    const countResult = await session.run(
+      `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
+       WHERE ($project IS NULL OR e.project = $project OR e.project IS NULL)
+         AND ($since IS NULL OR o.createdAt >= datetime($since))
+       RETURN count(o) AS total`,
+      { project: project ?? null, since: since ?? null }
+    );
+    const total = countResult.records[0]?.get("total")?.toNumber() ?? 0;
+
     const result = await session.run(
       `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
        WHERE ($project IS NULL OR e.project = $project OR e.project IS NULL)
@@ -206,7 +286,13 @@ export async function getTimeline({ project, since, limit = 300 }) {
        LIMIT $limit`,
       { project: project ?? null, since: since ?? null, limit: int(limit) }
     );
-    return result.records.map((r) => r.toObject());
+
+    const rows = result.records.map((r) => {
+      const row = r.toObject();
+      return { ...row, text: truncateText(row.text, maxTextChars) };
+    });
+    const { kept } = fitToBudget(rows, maxTotalChars);
+    return { events: kept, total, returned: kept.length, truncated: kept.length < total };
   });
 }
 

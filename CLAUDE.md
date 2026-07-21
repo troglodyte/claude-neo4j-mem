@@ -76,6 +76,13 @@ headless `claude -p` session with all 8 `memory_*` tools registering).
   reconfigure or switch between local/remote (e.g. Neo4j Aura) manually.
 - `scripts/check-health.sh` — verifies the whole stack end to end (container
   health, config, Neo4j auth, MCP handshake); prints PASS/FAIL per check.
+- `npm run usage` (or `scripts/memory-usage.sh`) — cross-project usage report:
+  every project in the db with entity/observation counts, first-seen, obs in
+  last 7 days, last activity, plus totals and hygiene warnings (duplicate
+  project names, oversized entities, empty stubs). `--quiet` for table only.
+- `scripts/cypher.sh "<query>"` — run arbitrary Cypher. Resolves credentials
+  automatically and borrows `cypher-shell` from inside the container in local
+  mode, so **no install is needed**; only remote-mode hosts need the binary.
 - `npm run memory -- <command>` (or `node scripts/memory-cli.mjs <command>`) —
   query/edit the graph from a terminal, outside a Claude session. Commands:
   `status`, `search`, `recent`, `get`, `add`, `relate`, `timeline`,
@@ -98,6 +105,72 @@ headless `claude -p` session with all 8 `memory_*` tools registering).
   daemon/transcript-watcher for continuous capture (would duplicate what the
   `PreCompact`/`SessionEnd` hooks already do now that they no longer need a
   separate API key, see below).
+
+## Search/recall fixes (2026-07-21)
+
+Three bugs found while auditing the graph, all fixed and verified:
+
+- **`searchMemory` returned the wrong observations.** Full-text matched
+  `Observation` nodes, then collapsed to the entity and returned
+  `collect(o.text)[0..5]` ordered by `createdAt DESC` — the entity's *newest*
+  observations, not the ones that matched. A hit buried in a large entity's
+  history was scored but never shown (searching `mbti` returned five
+  observations, none mentioning MBTI). Now re-queries the index per matched
+  entity for the best-scoring observations, topping up with recent ones so
+  name-only matches still return context.
+- **Lucene syntax in entity names silently broke search.** This plugin names
+  entities `feature:capture-visibility`, but Lucene reads `:` as a field
+  separator and `-` as negation, so searching for an entity by its own name
+  returned nothing. Queries are now escaped (`escapeLuceneQuery` in `graph.js`);
+  the trade is losing wildcard support.
+- **`getEntity` was uncapped.** One entity held 711 observations / 462k chars,
+  so a single `memory_get_entity` call put ~115k tokens into context. Now
+  defaults to the 50 newest and always returns `observationCount`; pass
+  `limit` (or `null` internally) for more.
+
+## claude-mem migration (`scripts/migrate-from-claude-mem.mjs`)
+
+Rewritten 2026-07-21 after both of its output defects showed up in real data:
+
+- **Project scope is now mapped, not copied.** claude-mem scopes by bare
+  directory name, this plugin by git-remote identifier, so importing under
+  claude-mem's name split one repo's memory across two scopes that could never
+  see each other (this happened to `prehire-insight`). Resolution order:
+  `--as ID` > git remote of cwd (only when the cwd basename matches the
+  claude-mem project) > bare name, and the bare-name fallback prints a warning
+  with the exact fix.
+- **Observations are split by claude-mem's `type`** (discovery, change,
+  feature, bugfix, refactor, decision, security_note) into
+  `<type>:<project>` entities, plus `session-summary:<project>`. The old
+  version discarded `type` and hung everything off one entity.
+- **Re-running is self-healing**: observation ids are content hashes, and
+  re-attaching also deletes stale `ABOUT` edges, so a pre-split import is
+  migrated in place and the emptied legacy entity is dropped.
+
+## Token-cost budgets (2026-07-21)
+
+Every read path was bounded by row count but never by characters, so cost was
+unpredictable: `memory_timeline` returned ~60k tokens by default and up to
+~300k at its old `limit: 2000` ceiling. Observation length varies 5x by
+source (claude-mem imports average 649 chars vs 122 for native capture), so
+row counts don't predict spend — a migrated project paid 5x at every ceiling.
+
+`src/lib/budget.js` now holds per-path character budgets, applied in
+`graph.js`. Anything trimmed says so in-band (`…[+N chars]`, or
+`{total, returned, truncated}` from `getTimeline`) so a caller never
+summarizes a silently-shortened history. Measured on `prehire-insight`:
+
+| path | before | after |
+| --- | --- | --- |
+| `memory_timeline` (default) | ~59.7k tok | ~8.0k tok |
+| `memory_timeline` (max limit) | ~300k tok | hard-capped ~10k tok |
+| `memory_get_entity` (uncapped) | ~53.7k tok | ~8.4k tok |
+| SessionStart injection | ~4.2k tok | ~2.3k tok |
+| `memory_search` | ~5.6k tok | ~3.2k tok |
+
+`npm run token-cost [-- --all]` measures every read path against a per-call
+ceiling and exits non-zero if one regresses. Run it after changing anything
+that shapes a read payload.
 
 ## Likely next steps
 

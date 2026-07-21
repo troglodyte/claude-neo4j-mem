@@ -207,11 +207,64 @@ the configure wizard against it using the credentials in `docker/.env`.
 - The full graph is also browsable directly in Neo4j's own UI at
   `http://localhost:7474` (local mode) — no custom viewer needed.
 
+### Token cost
+
+Reads are bounded by a character budget, not just a row count — see
+`src/lib/budget.js`. Observation length varies by source (bulk-imported history
+runs ~5x longer than natively-captured observations), so a row limit alone
+makes a call's cost unpredictable. Trimmed content is always marked in-band
+(`…[+N chars]`), and `memory_timeline` returns `{events, total, returned,
+truncated}` so a partial history is never mistaken for a complete one.
+
+`npm run token-cost [-- --all]` measures every read path and exits non-zero if
+one exceeds its per-call ceiling:
+
+```
+PATH                        CHARS  ~TOKENS  STATUS  NOTE
+SessionStart injection       8640     2160  ok       per session, always
+memory_timeline             31975     7994  ok       default limit
+```
+
+### Usage report
+
+`scripts/memory-usage.sh` (or `npm run usage`) prints every project registered
+in the database — entity/observation counts, first-seen date, observations in
+the last 7 days, and last activity — followed by database totals and hygiene
+warnings (projects recorded under two different names, entities hoarding 100+
+observations, empty entity stubs). Pass `--quiet` for just the table.
+
+```
+PROJECT                                    ENTITIES      OBS   OBS/7D FIRST        LAST ACTIVITY
+github.com/you/your-repo                         21      149      149 2026-07-20   2026-07-20T17:58
+
+Totals: 5 project(s), 51 entities, 1041 observations, 57 relations
+```
+
+The same per-project listing is available in-session as the
+`memory_list_projects` MCP tool, and as `npm run memory -- projects`.
+
 ### Cypher-shell cheatsheet
 
-For poking at the graph directly (`cypher-shell -u neo4j -p <password>`, or
-paste into the Neo4j Browser at `http://localhost:7474`). All of these
-respect the graph model in [Graph model](#graph-model) above.
+`scripts/cypher.sh "<query>"` runs arbitrary Cypher with no setup: it resolves
+credentials from `$NEO4J_*`, then `~/.claude-neo4j/config.json`, then
+`docker/.env`, and picks a `cypher-shell` binary automatically — preferring one
+on your `PATH` but otherwise **borrowing the copy inside the Neo4j container**,
+so local-mode users never have to install anything. It accepts a query as an
+argument or on stdin:
+
+```bash
+scripts/cypher.sh "MATCH (e:Entity) RETURN count(e);"
+echo "MATCH (o:Observation) RETURN count(o);" | scripts/cypher.sh
+```
+
+Only a remote database (Aura) on a host without `cypher-shell` needs a real
+install; the script prints platform-specific instructions if you hit that. Note
+that the `memory_*` MCP tools and `npm run memory -- <cmd>` talk to Neo4j over
+Bolt via the driver library and never require `cypher-shell` at all.
+
+The queries below work the same way if pasted into the Neo4j Browser at
+`http://localhost:7474`. All of these respect the graph model in
+[Graph model](#graph-model) above.
 
 ```cypher
 // List every project tracked in the db, with entity/observation counts and
