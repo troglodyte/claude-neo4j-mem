@@ -47,3 +47,17 @@ test("addObservations snaps a near-duplicate tag onto the existing one", async (
   assert.equal(bySlug.capture, 2, "'captures' should have merged into 'capture'");
   assert.equal(bySlug.captures, undefined);
 });
+
+test("getSubsystemMap aggregates counts and buckets untagged observations", async () => {
+  const map = await graph.getSubsystemMap(PROJECT);
+  const byName = Object.fromEntries(map.map((row) => [row.subsystem, row]));
+
+  assert.equal(byName.capture.observations, 2);
+  assert.equal(byName.capture.entities, 1);
+  assert.match(byName.capture.lastSeen, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(byName.backup.observations, 1);
+  assert.equal(byName["(untagged)"].observations, 1, "untagged facts get their own row, not hidden");
+
+  const sizes = map.map((row) => row.observations);
+  assert.ok(sizes.length <= 4, "the map is bounded by tag cardinality, not by observation count");
+});

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { withSession, int } from "./neo4jClient.js";
 import { resolveCanonicalName } from "./dedup.js";
-import { resolveSubsystem } from "./subsystem.js";
+import { resolveSubsystem, UNTAGGED } from "./subsystem.js";
 import { BUDGETS, truncateText, fitToBudget } from "./budget.js";
 
 // Callers search with plain phrases and with entity names, and this plugin's
@@ -65,6 +65,38 @@ export async function listSubsystems(project) {
     return result.records.map((r) => ({
       subsystem: r.get("subsystem"),
       observations: r.get("observations").toNumber(),
+    }));
+  });
+}
+
+/**
+ * A table of contents for the project's memory: one row per subsystem tag with
+ * counts and recency. Deliberately an aggregate rather than a sample - its size
+ * is bounded by tag cardinality, not by how much text the graph holds, so it
+ * costs the same on a 200-observation project and a 20,000-observation one.
+ * That is what lets the SessionStart injection stop growing with the graph.
+ *
+ * Untagged observations get their own row rather than being dropped: an honest
+ * count of what hasn't been classified beats a tidy short list.
+ */
+export async function getSubsystemMap(project) {
+  return withSession(async (session) => {
+    const result = await session.run(
+      `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
+       WHERE $project IS NULL OR e.project = $project OR e.project IS NULL
+       WITH coalesce(o.subsystem, $untagged) AS subsystem, o, e
+       RETURN subsystem,
+              count(o) AS observations,
+              count(DISTINCT e) AS entities,
+              toString(max(o.createdAt)) AS lastSeen
+       ORDER BY lastSeen DESC`,
+      { project: project ?? null, untagged: UNTAGGED }
+    );
+    return result.records.map((r) => ({
+      subsystem: r.get("subsystem"),
+      observations: r.get("observations").toNumber(),
+      entities: r.get("entities").toNumber(),
+      lastSeen: r.get("lastSeen"),
     }));
   });
 }
