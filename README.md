@@ -16,13 +16,15 @@ Works against either:
 
 ## How it works
 
-- **`SessionStart` hook** queries the graph for the current project's most
-  relevant recent entities/observations and injects them as context, plus a
-  note telling Claude which memory tools are available. It also prints a short
-  visible banner in the terminal (e.g. `🧠 Neo4j memory: loaded 12
-  observation(s) across 5 entities for <project>.`) — or, if the plugin isn't
-  configured or Neo4j isn't reachable yet, a banner pointing you at
-  `scripts/setup-local.sh` / `README.md` instead of failing silently.
+- **`SessionStart` hook** injects a compact, fixed-cost snapshot of the current
+  project's memory: the standing facts that always apply (user preferences and
+  constraints, quoted verbatim) followed by a one-line-per-subsystem index of
+  everything else, so Claude knows what exists and can `memory_search` into it
+  rather than being handed a recency dump. It also prints a short visible banner
+  in the terminal (e.g. `🧠 Neo4j memory: 223 observation(s) across 6
+  subsystem(s) for <project>.`) — or, if the plugin isn't configured or Neo4j
+  isn't reachable yet, a banner pointing you at `scripts/setup-local.sh` /
+  `README.md` instead of failing silently.
 - **MCP server** (`neo4j-memory`) exposes tools Claude can call any time during
   a session: `memory_search`, `memory_get_entity`, `memory_recent`,
   `memory_add_observations`, `memory_create_relation`,
