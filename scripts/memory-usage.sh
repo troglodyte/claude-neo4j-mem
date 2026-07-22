@@ -124,6 +124,22 @@ ${ORPHANS}
 "
 fi
 
+# Too many subsystem tags means the map they feed has stopped being a map. The
+# usual cause is near-synonyms ("capture" and "auto-capture") that the lexical
+# deduper can't merge because they aren't lexically close.
+TAGS="$(run_query "
+MATCH (o:Observation)-[:ABOUT]->(e:Entity) WHERE o.subsystem IS NOT NULL
+WITH e.project AS project, count(DISTINCT o.subsystem) AS tags
+WHERE tags > 12
+RETURN '  ' + coalesce(project,'no project') + ': ' + toString(tags) + ' distinct subsystems' AS row
+ORDER BY tags DESC;")"
+if [ -n "$TAGS" ]; then
+  WARNINGS="${WARNINGS}Projects with a fragmented subsystem map (merge near-synonyms):
+${TAGS}
+
+"
+fi
+
 if [ -n "$WARNINGS" ]; then
   echo
   printf '%s' "$WARNINGS"

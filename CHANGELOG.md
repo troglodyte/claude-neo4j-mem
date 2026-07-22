@@ -6,7 +6,7 @@ Version numbers track `.claude-plugin/plugin.json` and `package.json`, which are
 kept in step deliberately: `claude plugin update` compares that string, so a
 release that doesn't move it never reaches any other project.
 
-## Unreleased — 0.3.0
+## 0.3.0 — 2026-07-22
 
 Subsystem-tagged facts and a much smaller SessionStart injection.
 See `docs/superpowers/specs/2026-07-22-subsystem-tagging-and-tiny-injection-design.md`.
@@ -20,6 +20,40 @@ See `docs/superpowers/specs/2026-07-22-subsystem-tagging-and-tiny-injection-desi
 - **Added** JavaScript unit tests. `npm test` now runs the existing
   `tests/launcher-path.test.sh` guard *and* `node --test`, with no new
   dependencies.
+- **Added** an `Observation.subsystem` property plus a range index
+  (`observation_subsystem`), and `listSubsystems`/`getSubsystemMap` reads in
+  `src/lib/graph.js`. `addObservations` now accepts `{text, subsystem}` per
+  observation (a plain string still works) and resolves each tag through
+  `resolveSubsystem` so near-duplicates snap onto whichever tag is already in
+  use for the project.
+- **Added** `getPinnedFacts` — standing facts (preferences, constraints, the
+  `user` entity) selected for every-session injection, budgeted by
+  `pinnedTotalChars` (4,000 chars) and `pinnedTextChars` (300 chars/quote) in
+  `src/lib/budget.js`, and reporting `{facts, total, returned, truncated}`
+  rather than dropping overflow silently.
+- **Changed** the `SessionStart` injection from a recency dump to pinned
+  standing facts plus a compact subsystem index (`src/lib/injection.js`).
+  Measured on `claude-neo4j-mem`: 2,672 characters / 668 tokens, down from
+  ~6.4k characters / ~2.3k tokens; all four real projects now land between
+  1,232 and 2,672 characters.
+- **Added** a `subsystem` filter to `memory_search`, `memory_recent`, and
+  `memory_timeline` (and their `graph.js` equivalents), plus a call-level
+  `subsystem` on `memory_add_observations`, so the map's entries resolve back
+  to a scoped read.
+- **Changed** auto-capture (`PreCompact`/`SessionEnd`) to tag every
+  observation it extracts with a subsystem, seeding the extraction prompt
+  with the project's known tags so it reuses them instead of inventing
+  near-duplicates. Lifted the shared spawn/timeout/parse logic into
+  `src/lib/extract.js`, used by both auto-capture and the new backfill
+  script.
+- **Added** `scripts/backfill-subsystems.mjs` (`npm run backfill-subsystems`)
+  to tag pre-existing observations. Idempotent (only ever selects
+  `subsystem IS NULL`), resumable (writes per batch, not accumulated to the
+  end), and processes entities largest-first per project so the vocabulary
+  the early batches establish is what later, smaller batches reuse.
+- **Added** an `npm run usage` hygiene warning for a fragmented subsystem map
+  (a project with more than 12 distinct tags), naming the projects so
+  near-synonyms can be merged by hand.
 
 ## 0.2.0 — 2026-07-21
 

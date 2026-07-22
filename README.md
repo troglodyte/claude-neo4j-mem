@@ -27,7 +27,11 @@ Works against either:
   a session: `memory_search`, `memory_get_entity`, `memory_recent`,
   `memory_add_observations`, `memory_create_relation`,
   `memory_delete_observations`, `memory_delete_entity`, `memory_prune`,
-  `memory_timeline`, `memory_status`. The write tools (`memory_add_observations`,
+  `memory_timeline`, `memory_status`. Every observation carries a `subsystem`
+  tag (e.g. `capture`, `search`, `backup`) inferred at write time; `memory_search`,
+  `memory_recent`, and `memory_timeline` all accept an optional `subsystem`
+  parameter to scope a read to one tag, and `memory_add_observations` accepts
+  a call-level `subsystem` to tag the whole batch being written. The write tools (`memory_add_observations`,
   `memory_create_relation`, `memory_delete_observations`,
   `memory_delete_entity`, `memory_prune`) return a `confirmation` string that
   Claude relays as a short line (e.g. "🧠 remembered 2 observation(s) on ...")
@@ -214,6 +218,12 @@ the configure wizard against it using the credentials in `docker/.env`.
   session.
 - `scripts/check-health.sh` — verifies Docker container health, plugin config,
   Neo4j auth, and the MCP handshake in one shot.
+- `npm run backfill-subsystems` — tags pre-existing observations that predate
+  subsystem tagging. Idempotent and resumable (only ever selects
+  `subsystem IS NULL`, writes per batch), and processes entities largest-first
+  per project so the vocabulary early batches establish is what later,
+  smaller batches reuse. `--dry-run` previews without writing; `--project`
+  scopes to one project.
 - A statusline showing `<model> · 🧠 <entities>e/<observations>o` can be wired
   via `scripts/statusline.mjs` (see `.claude/settings.local.json`).
 - The full graph is also browsable directly in Neo4j's own UI at
