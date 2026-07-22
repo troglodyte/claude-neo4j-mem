@@ -13,7 +13,8 @@
     "backup": "bash scripts/backup.sh",
     "restore": "bash scripts/restore.sh",
     "token-cost": "node scripts/token-cost.mjs",
-    "migrate-claude-mem": "node scripts/migrate-from-claude-mem.mjs"
+    "migrate-claude-mem": "node scripts/migrate-from-claude-mem.mjs",
+    "backfill-subsystems": "node scripts/backfill-subsystems.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.19.0",
