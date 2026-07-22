@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { withSession, int } from "./neo4jClient.js";
 import { resolveCanonicalName } from "./dedup.js";
+import { resolveSubsystem } from "./subsystem.js";
 import { BUDGETS, truncateText, fitToBudget } from "./budget.js";
 
 // Callers search with plain phrases and with entity names, and this plugin's
@@ -46,6 +47,28 @@ export async function listEntityNames(project) {
   });
 }
 
+/**
+ * The project's existing subsystem vocabulary, most-used first. Fed to the
+ * extraction prompt and to the write path so new tags converge on the ones
+ * already in use instead of fragmenting.
+ */
+export async function listSubsystems(project) {
+  return withSession(async (session) => {
+    const result = await session.run(
+      `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
+       WHERE ($project IS NULL OR e.project = $project OR e.project IS NULL)
+         AND o.subsystem IS NOT NULL
+       RETURN o.subsystem AS subsystem, count(o) AS observations
+       ORDER BY observations DESC, subsystem ASC`,
+      { project: project ?? null }
+    );
+    return result.records.map((r) => ({
+      subsystem: r.get("subsystem"),
+      observations: r.get("observations").toNumber(),
+    }));
+  });
+}
+
 export async function upsertSession({ id, cwd, project }) {
   return withSession(async (session) => {
     await session.run(
@@ -56,19 +79,33 @@ export async function upsertSession({ id, cwd, project }) {
   });
 }
 
-// `existingNames` lets a caller writing several entities in a row fetch the
-// name list once instead of per call. It used to be fetched inside the session
-// below - a nested session acquisition plus a full re-scan of every entity name
-// on each call, so one 8-entity capture opened 16 sessions and ran the same
-// scan 8 times.
-export async function addObservations({ entity, entityType, observations, sessionId, project, existingNames }) {
-  // Bounded on the way in, so one runaway observation can't inflate every
-  // future read that touches this entity.
-  const rows = observations.map((text) => ({
-    id: randomUUID(),
-    text: truncateText(text, BUDGETS.writeTextChars),
-  }));
+// `existingNames`/`existingSubsystems` let a caller writing several entities
+// in a row fetch these lists once instead of per call. They used to be
+// fetched inside the session below - a nested session acquisition plus a
+// full re-scan on each call, so one 8-entity capture opened 16 sessions and
+// ran the same scans 8 times.
+export async function addObservations({
+  entity,
+  entityType,
+  observations,
+  sessionId,
+  project,
+  existingNames,
+  existingSubsystems,
+}) {
   const names = existingNames ?? (await listEntityNames(project));
+  const knownSubsystems = existingSubsystems ?? (await listSubsystems(project)).map((s) => s.subsystem);
+  // Accepts a plain string or {text, subsystem}: the MCP tool and the CLI pass
+  // strings, auto-capture and the backfill pass objects. Bounded on the way in,
+  // so one runaway observation can't inflate every future read of this entity.
+  const rows = observations.map((item) => {
+    const { text, subsystem } = typeof item === "string" ? { text: item, subsystem: null } : item;
+    return {
+      id: randomUUID(),
+      text: truncateText(text, BUDGETS.writeTextChars),
+      subsystem: resolveSubsystem(subsystem, knownSubsystems),
+    };
+  });
   entity = resolveCanonicalName(entity, names);
   await withSession(async (session) => {
     await upsertEntity(session, entity, entityType, project);
@@ -76,7 +113,7 @@ export async function addObservations({ entity, entityType, observations, sessio
       `MATCH (e:Entity {name: $entity})
        WHERE ($project IS NOT NULL AND e.project = $project) OR ($project IS NULL AND e.project IS NULL)
        UNWIND $rows AS row
-       CREATE (o:Observation {id: row.id, text: row.text, createdAt: datetime(), sessionId: $sessionId})
+       CREATE (o:Observation {id: row.id, text: row.text, subsystem: row.subsystem, createdAt: datetime(), sessionId: $sessionId})
        CREATE (o)-[:ABOUT]->(e)
        WITH o
        CALL {
