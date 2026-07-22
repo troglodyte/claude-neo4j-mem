@@ -1513,6 +1513,13 @@ Set `"version": "0.3.0"` in **both** `.claude-plugin/plugin.json` and `package.j
 
 - [ ] **Step 9: Update the docs**
 
+In `CHANGELOG.md`, retitle the `## Unreleased — 0.3.0` heading to
+`## 0.3.0 — 2026-07-22` and confirm its entries cover the whole feature: the
+`subsystem` property and its index, the new injection shape, the `subsystem`
+filter on the read tools, `npm run backfill-subsystems`, and the fragmented-map
+warning in `npm run usage`. The controller appends an entry per task as the plan
+runs, so this step is a completeness check rather than a from-scratch write.
+
 In `README.md`, document the `subsystem` parameter on `memory_search` / `memory_recent` / `memory_timeline` and on `memory_add_observations`, and add `npm run backfill-subsystems` to the commands list.
 
 In `CLAUDE.md`, add a section recording what changed and why — the injection shape, why tags live on observations rather than entities, and that `npm run usage` now warns on a fragmented map. Update the "Token-cost budgets" table's SessionStart row from `~2.3k tok` to the measured new figure.
