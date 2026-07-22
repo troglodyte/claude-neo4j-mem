@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Tag every observation with a subsystem, then replace the SessionStart recency dump with pinned standing facts plus a compact subsystem map, cutting the per-session injection from ~6.4k to ~2.8k characters.
+**Goal:** Tag every observation with a subsystem, then replace the SessionStart recency dump with pinned standing facts plus a compact subsystem map, cutting the per-session injection from ~6.4k to ~4.6k characters.
 
 **Architecture:** A new nullable `subsystem` property on `Observation` nodes, populated by auto-capture going forward and by a one-off LLM backfill for the 1470 existing observations. Two new aggregate read paths in `src/lib/graph.js` (`getSubsystemMap`, `getPinnedFacts`) feed a pure render function in a new `src/lib/injection.js`, which `src/hooks/session-start.js` and `scripts/token-cost.mjs` both call so the measurement can never drift from the real thing.
 
@@ -416,7 +416,7 @@ Expected: PASS — 3 tests, 0 failures
 
 **Interfaces:**
 - Consumes: `BUDGETS`, `truncateText`, `fitToBudget` from `src/lib/budget.js`
-- Produces: `getPinnedFacts({project: string | null, limit?: number}): Promise<Array<{entity: string, type: string | null, text: string}>>`, newest first
+- Produces: `getPinnedFacts({project: string | null, limit?: number}): Promise<{facts: Array<{entity: string, type: string | null, text: string}>, total: number, returned: number, truncated: boolean}>`, newest first
 
 - [ ] **Step 1: Write the failing test**
 
@@ -472,8 +472,8 @@ after(async () => {
 });
 
 test("getPinnedFacts selects standing facts and excludes one-off decisions", async () => {
-  const pinned = await graph.getPinnedFacts({ project: PROJECT });
-  const texts = pinned.map((p) => p.text);
+  const { facts } = await graph.getPinnedFacts({ project: PROJECT });
+  const texts = facts.map((p) => p.text);
 
   assert.ok(texts.some((t) => t.includes("assert on behaviour")), "preference: must pin");
   assert.ok(texts.some((t) => t.includes("Europe/London")), "user must pin");
@@ -482,12 +482,26 @@ test("getPinnedFacts selects standing facts and excludes one-off decisions", asy
 });
 
 test("getPinnedFacts enforces its character budget", async () => {
-  const pinned = await graph.getPinnedFacts({ project: PROJECT });
-  const total = JSON.stringify(pinned).length;
+  const { facts } = await graph.getPinnedFacts({ project: PROJECT });
+  const total = JSON.stringify(facts).length;
   assert.ok(total <= BUDGETS.pinnedTotalChars, `pinned payload was ${total} chars`);
-  for (const fact of pinned) {
+  for (const fact of facts) {
     assert.ok(fact.text.length <= BUDGETS.pinnedTextChars + 24, "long text must be truncated in-band");
   }
+});
+
+test("getPinnedFacts reports its own truncation rather than dropping silently", async () => {
+  const whole = await graph.getPinnedFacts({ project: PROJECT });
+  assert.equal(whole.returned, whole.facts.length);
+  assert.equal(whole.total, 3, "all three standing facts are eligible");
+  assert.equal(whole.truncated, false, "nothing is dropped when the budget has room");
+
+  // `limit` is the driver-level valve; forcing it low proves the report is
+  // wired to the real counts and not hardcoded.
+  const clipped = await graph.getPinnedFacts({ project: PROJECT, limit: 1 });
+  assert.equal(clipped.returned, 1);
+  assert.equal(clipped.total, 3, "total is the true eligible count, not the returned count");
+  assert.equal(clipped.truncated, true);
 });
 ```
 
@@ -501,11 +515,14 @@ Expected: FAIL — `graph.getPinnedFacts is not a function`
 In `src/lib/budget.js`, add to the `BUDGETS` object, next to `recentTextChars`:
 
 ```js
-  // Injected verbatim into every session alongside the subsystem map, so it is
-  // bounded hard. Measured headroom: across four live projects the largest
-  // pinned set is 28 observations / ~2.2k chars, the smallest 11 / ~855.
+  // Injected verbatim into every session alongside the subsystem map. Sized to
+  // fit the largest real pinned set whole - 28 observations at ~138 chars each
+  // is ~3.9k - because a standing preference the model never sees may as well
+  // not exist. An earlier 2_000 silently dropped half the standing facts on
+  // three of four live projects; the ceiling stays only as a backstop against a
+  // project that accumulates far more, and getPinnedFacts reports when it bites.
   pinnedTextChars: 300,
-  pinnedTotalChars: 2_000,
+  pinnedTotalChars: 4_000,
 ```
 
 - [ ] **Step 4: Write `getPinnedFacts`**
@@ -520,28 +537,44 @@ Add to `src/lib/graph.js` immediately after `getRecentContext` (currently ends a
 // extraction model sets deliberately; the name prefix is decoration.
 const PINNED_TYPES = ["user", "preference", "constraint", "convention"];
 
+// Shared by the count and the fetch so the two can never disagree about what
+// "pinned" means - a `total` computed from a different predicate than the rows
+// would be worse than no total at all.
+const PINNED_MATCH = `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
+       WHERE ($project IS NULL OR e.project = $project OR e.project IS NULL)
+         AND (any(t IN $types WHERE toLower(coalesce(e.type, '')) STARTS WITH t) OR e.name = 'user')`;
+
 /**
  * The standing preferences and constraints injected verbatim at SessionStart.
  * These are cross-cutting by nature and worthless if the model has to go looking
  * for them, which is why they are the one thing the injection still quotes in
  * full rather than merely indexing.
+ *
+ * Returns {facts, total, returned, truncated} rather than a bare array, for the
+ * same reason getTimeline does: a caller that silently receives half the
+ * standing facts will confidently act as though it has all of them. `limit` is a
+ * driver-level safety valve set far above what the character budget will ever
+ * pass, not the effective bound - the budget is.
  */
-export async function getPinnedFacts({ project, limit = 20 } = {}) {
+export async function getPinnedFacts({ project, limit = 100 } = {}) {
   return withSession(async (session) => {
+    const params = { project: project ?? null, types: PINNED_TYPES };
+    const countResult = await session.run(`${PINNED_MATCH} RETURN count(o) AS total`, params);
+    const total = countResult.records[0]?.get("total")?.toNumber() ?? 0;
+
     const result = await session.run(
-      `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
-       WHERE ($project IS NULL OR e.project = $project OR e.project IS NULL)
-         AND (any(t IN $types WHERE toLower(coalesce(e.type, '')) STARTS WITH t) OR e.name = 'user')
+      `${PINNED_MATCH}
        WITH e, o ORDER BY o.createdAt DESC
        LIMIT $limit
        RETURN e.name AS entity, e.type AS type, o.text AS text`,
-      { project: project ?? null, types: PINNED_TYPES, limit: int(limit) }
+      { ...params, limit: int(limit) }
     );
     const rows = result.records.map((r) => {
       const row = r.toObject();
       return { ...row, text: truncateText(row.text, BUDGETS.pinnedTextChars) };
     });
-    return fitToBudget(rows, BUDGETS.pinnedTotalChars).kept;
+    const { kept } = fitToBudget(rows, BUDGETS.pinnedTotalChars);
+    return { facts: kept, total, returned: kept.length, truncated: kept.length < total };
   });
 }
 ```
@@ -735,7 +768,7 @@ Expected: PASS on every check, including the MCP handshake.
 
 **Interfaces:**
 - Consumes: `getPinnedFacts` (Task 4), `getSubsystemMap` (Task 3), `UNTAGGED` (Task 1)
-- Produces: `renderInjection({project: string, pinned: Array<{text: string}>, map: Array<{subsystem: string, observations: number, lastSeen: string}>}): string`
+- Produces: `renderInjection({project: string, pinned: {facts: Array<{text: string}>, total: number, returned: number, truncated: boolean}, map: Array<{subsystem: string, observations: number, lastSeen: string}>}): string`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -748,10 +781,15 @@ import { renderInjection } from "../src/lib/injection.js";
 
 const PROJECT = "github.com/troglodyte/claude-neo4j-mem";
 
-const PINNED = [
-  { text: "bound every read path by characters, not row count" },
-  { text: "wants write confirmations visible in-band" },
-];
+const PINNED = {
+  facts: [
+    { text: "bound every read path by characters, not row count" },
+    { text: "wants write confirmations visible in-band" },
+  ],
+  total: 2,
+  returned: 2,
+  truncated: false,
+};
 
 const MAP = [
   { subsystem: "capture", observations: 34, entities: 5, lastSeen: "2026-07-21T09:00:00Z" },
@@ -772,15 +810,26 @@ test("renderInjection quotes pinned facts and indexes everything else", () => {
 
 test("renderInjection stays inside its budget on realistic input", () => {
   const out = renderInjection({ project: PROJECT, pinned: PINNED, map: MAP });
-  assert.ok(out.length < 3_500, `injection was ${out.length} chars`);
+  assert.ok(out.length < 6_000, `injection was ${out.length} chars`);
+});
+
+test("renderInjection says so when standing facts were dropped", () => {
+  const clipped = { ...PINNED, total: 9, returned: 2, truncated: true };
+  const out = renderInjection({ project: PROJECT, pinned: clipped, map: MAP });
+  assert.ok(out.includes("7 more"), "names how many standing facts are missing");
+  assert.ok(out.includes("memory_search"), "says how to read the rest");
+
+  const whole = renderInjection({ project: PROJECT, pinned: PINNED, map: MAP });
+  assert.ok(!whole.includes("more standing fact"), "no truncation note when nothing was dropped");
 });
 
 test("renderInjection omits empty sections rather than printing empty headings", () => {
-  const noPinned = renderInjection({ project: PROJECT, pinned: [], map: MAP });
+  const none = { facts: [], total: 0, returned: 0, truncated: false };
+  const noPinned = renderInjection({ project: PROJECT, pinned: none, map: MAP });
   assert.ok(!noPinned.includes("Always applies"));
   assert.ok(noPinned.includes("capture (34"));
 
-  const empty = renderInjection({ project: PROJECT, pinned: [], map: [] });
+  const empty = renderInjection({ project: PROJECT, pinned: none, map: [] });
   assert.ok(!empty.includes("Always applies"));
   assert.ok(!empty.includes("Tagged history"));
   assert.ok(empty.includes(PROJECT), "still identifies the project");
@@ -822,11 +871,20 @@ const TOOLS_BLURB =
 // repeated once per tag.
 const shortDate = (iso) => (typeof iso === "string" && iso.length >= 10 ? iso.slice(5, 10) : "?");
 
-export function renderInjection({ project, pinned = [], map = [] }) {
+export function renderInjection({ project, pinned, map = [] }) {
   const sections = [`## Memory (Neo4j · ${project})`];
 
-  if (pinned.length > 0) {
-    sections.push(`Always applies:\n${pinned.map((fact) => `- ${fact.text}`).join("\n")}`);
+  const facts = pinned?.facts ?? [];
+  if (facts.length > 0) {
+    let block = `Always applies:\n${facts.map((fact) => `- ${fact.text}`).join("\n")}`;
+    // A standing preference the model never sees may as well not exist, so if
+    // the budget bit, say so rather than letting a partial list read as whole.
+    if (pinned.truncated) {
+      block +=
+        `\n- [${pinned.total - pinned.returned} more standing fact(s) not shown — ` +
+        `memory_search("preference") or memory_search("constraint") to read them]`;
+    }
+    sections.push(block);
   }
 
   if (map.length > 0) {
@@ -893,14 +951,14 @@ Run:
 ```bash
 echo '{"session_id":"plan-test-1","cwd":"'"$PWD"'"}' | node src/hooks/session-start.js | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);console.log(j.hookSpecificOutput.additionalContext);console.error("\n--- "+j.hookSpecificOutput.additionalContext.length+" chars");})'
 ```
-Expected: the new format prints — a `## Memory (Neo4j · …)` heading, an `Always applies:` block, a `Tagged history` line that is mostly `(untagged)` until Task 8's backfill runs, and a length under 3500.
+Expected: the new format prints — a `## Memory (Neo4j · …)` heading, an `Always applies:` block, a `Tagged history` line that is mostly `(untagged)` until Task 8's backfill runs, and a length under 6000.
 
 - [ ] **Step 7: Point `token-cost.mjs` at the real renderer and tighten the ceiling**
 
 In `scripts/token-cost.mjs`, lower the ceiling at line 19:
 
 ```js
-  "SessionStart injection": 3_500,
+  "SessionStart injection": 6_000,
 ```
 
 Add the import next to the others:
@@ -922,7 +980,7 @@ Then replace the injection measurement in `measure()` (lines 56-61) — this del
 - [ ] **Step 8: Measure the saving**
 
 Run: `npm run token-cost -- --all`
-Expected: every row PASSes, and `SessionStart injection` is well under 3500 characters on all four projects — down from ~6.4k on `claude-neo4j-mem`.
+Expected: every row PASSes, and `SessionStart injection` is well under 6000 characters on all four projects — down from ~6.4k on `claude-neo4j-mem`.
 
 ---
 
@@ -1491,7 +1549,7 @@ bash scripts/cypher.sh "MATCH (o:Observation) WHERE o.subsystem = 'auto-capture'
 - [ ] **Step 5: Measure the saving for real**
 
 Run: `npm run token-cost -- --all`
-Expected: every row PASSes. `SessionStart injection` should land near ~2.8k characters on `claude-neo4j-mem`, against the pre-change ~6.4k.
+Expected: every row PASSes. `SessionStart injection` should land near ~4.6k characters on `claude-neo4j-mem`, against the pre-change ~6.4k.
 
 - [ ] **Step 6: Run the whole suite**
 

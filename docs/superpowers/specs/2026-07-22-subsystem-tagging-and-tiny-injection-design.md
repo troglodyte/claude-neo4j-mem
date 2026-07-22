@@ -44,7 +44,7 @@ The injection becomes two parts, neither of which grows with the graph:
 Everything else becomes lookup-only, reachable through `memory_search` with a
 `subsystem` filter.
 
-Target: **~6.4k → ~2.8k characters, ~2.3k → ~700 tokens.**
+Target: **~6.4k → ~4.6k characters, ~2.3k → ~1.15k tokens.**
 
 ### Why observation-level tags, not entity-level
 
@@ -116,11 +116,17 @@ New entries in `src/lib/budget.js`:
 
 ```js
 pinnedTextChars: 300,
-pinnedTotalChars: 2_000,
+pinnedTotalChars: 4_000,
 ```
 
-Measured headroom: the largest pinned set across the four live projects is 28
-observations / ~2.2k characters (`claude-neo4j-mem`); the smallest is 11 / ~855.
+Sized to fit the largest real pinned set whole: 28 observations at ~138
+characters each is ~3.9k (`claude-neo4j-mem`); the smallest project is 12.
+An earlier 2_000 was set from observation *counts* without multiplying by
+per-observation length, and silently dropped roughly half the standing facts on
+three of the four live projects. `getPinnedFacts` therefore returns
+`{facts, total, returned, truncated}` rather than a bare array, so a caller that
+receives a partial list cannot mistake it for a whole one — the same shape and
+the same reason as `getTimeline`.
 
 ## Injection format
 
@@ -195,7 +201,7 @@ Expected cost: ~134 calls covering 1470 observations.
 ## Verification
 
 - `scripts/token-cost.mjs:19` — lower the `SessionStart injection` ceiling from
-  14_000 to 3_500 characters. The script already exits non-zero on regression,
+  14_000 to 6_000 characters. The script already exits non-zero on regression,
   so this is what stops the injection creeping back up.
 - Unit tests for `getSubsystemMap` (aggregate shape, `(untagged)` bucket) and
   `getPinnedFacts` (type selection, budget enforcement).
