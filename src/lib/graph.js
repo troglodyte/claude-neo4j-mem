@@ -178,14 +178,18 @@ export async function createRelation({ from, to, type, project }) {
   });
 }
 
-export async function searchMemory(query, limit = 10, project = null) {
+export async function searchMemory(query, limit = 10, project = null, { subsystem = null } = {}) {
   return withSession(async (session) => {
     const result = await session.run(
       `CALL {
          CALL db.index.fulltext.queryNodes('entityNameFulltext', $query) YIELD node, score
-         RETURN node AS entity, score
+         WITH node AS entity, score
+         WHERE $subsystem IS NULL
+            OR EXISTS { MATCH (o:Observation)-[:ABOUT]->(entity) WHERE o.subsystem = $subsystem }
+         RETURN entity, score
          UNION
          CALL db.index.fulltext.queryNodes('observationTextFulltext', $query) YIELD node, score
+         WHERE $subsystem IS NULL OR node.subsystem = $subsystem
          MATCH (node)-[:ABOUT]->(entity)
          RETURN entity, score
        }
@@ -205,6 +209,7 @@ export async function searchMemory(query, limit = 10, project = null) {
        CALL {
          WITH entity
          CALL db.index.fulltext.queryNodes('observationTextFulltext', $query) YIELD node, score AS obsScore
+         WHERE $subsystem IS NULL OR node.subsystem = $subsystem
          MATCH (node)-[:ABOUT]->(entity)
          RETURN node.text AS text
          ORDER BY obsScore DESC
@@ -214,6 +219,7 @@ export async function searchMemory(query, limit = 10, project = null) {
        // Top up with recent observations so an entity matched only by name
        // (or by fewer than five observations) still comes back with context.
        OPTIONAL MATCH (o:Observation)-[:ABOUT]->(entity)
+       WHERE $subsystem IS NULL OR o.subsystem = $subsystem
        WITH entity, rankScore, matched, o
        ORDER BY o.createdAt DESC
        WITH entity, rankScore, matched, collect(o.text) AS recent
@@ -224,7 +230,7 @@ export async function searchMemory(query, limit = 10, project = null) {
        WITH entity, rankScore, observations, [x IN relationsRaw WHERE x IS NOT NULL] AS relations
        RETURN entity.name AS name, entity.type AS type, rankScore AS score, observations, relations
        ORDER BY rankScore DESC`,
-      { query: escapeLuceneQuery(query), limit: int(limit), project: project ?? null }
+      { query: escapeLuceneQuery(query), limit: int(limit), project: project ?? null, subsystem }
     );
     const rows = result.records.map((r) => {
       const row = r.toObject();
@@ -279,18 +285,19 @@ export async function getEntity(name, project = null, { limit = 50 } = {}) {
   });
 }
 
-export async function getRecentContext({ project, limit = 15 }) {
+export async function getRecentContext({ project, limit = 15, subsystem = null }) {
   return withSession(async (session) => {
     const result = await session.run(
       `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
-       WHERE $project IS NULL OR e.project = $project OR e.project IS NULL
+       WHERE ($project IS NULL OR e.project = $project OR e.project IS NULL)
+         AND ($subsystem IS NULL OR o.subsystem = $subsystem)
        WITH e, o ORDER BY o.createdAt DESC
        WITH e, collect(o.text)[0..3] AS observations, max(o.createdAt) AS lastSeen
        ORDER BY lastSeen DESC
        LIMIT $limit
        RETURN e.name AS name, e.type AS type, observations
        ORDER BY lastSeen DESC`,
-      { project: project ?? null, limit: int(limit) }
+      { project: project ?? null, limit: int(limit), subsystem }
     );
     // This is the SessionStart injection, paid once per session on every
     // session, so it gets the tightest budget of any read path.
@@ -386,6 +393,7 @@ export async function getTimeline({
   project,
   since,
   limit = 100,
+  subsystem = null,
   maxTextChars = BUDGETS.timelineTextChars,
   maxTotalChars = BUDGETS.timelineTotalChars,
 } = {}) {
@@ -394,8 +402,9 @@ export async function getTimeline({
       `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
        WHERE ($project IS NULL OR e.project = $project OR e.project IS NULL)
          AND ($since IS NULL OR o.createdAt >= datetime($since))
+         AND ($subsystem IS NULL OR o.subsystem = $subsystem)
        RETURN count(o) AS total`,
-      { project: project ?? null, since: since ?? null }
+      { project: project ?? null, since: since ?? null, subsystem }
     );
     const total = countResult.records[0]?.get("total")?.toNumber() ?? 0;
 
@@ -403,10 +412,11 @@ export async function getTimeline({
       `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
        WHERE ($project IS NULL OR e.project = $project OR e.project IS NULL)
          AND ($since IS NULL OR o.createdAt >= datetime($since))
+         AND ($subsystem IS NULL OR o.subsystem = $subsystem)
        RETURN e.name AS entity, e.type AS type, o.text AS text, toString(o.createdAt) AS createdAt
        ORDER BY o.createdAt ASC
        LIMIT $limit`,
-      { project: project ?? null, since: since ?? null, limit: int(limit) }
+      { project: project ?? null, since: since ?? null, limit: int(limit), subsystem }
     );
 
     const rows = result.records.map((r) => {
