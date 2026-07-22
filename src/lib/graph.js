@@ -302,6 +302,38 @@ export async function getRecentContext({ project, limit = 15 }) {
   });
 }
 
+// Entity types whose observations always apply, whatever this session is about.
+// Matched by prefix against `type` rather than against the name, because the two
+// drift in real data: "architecture:docker-env-to-config" is typed "decision",
+// and one live entity is typed "Constraint Amendment". `type` is what the
+// extraction model sets deliberately; the name prefix is decoration.
+const PINNED_TYPES = ["user", "preference", "constraint", "convention"];
+
+/**
+ * The standing preferences and constraints injected verbatim at SessionStart.
+ * These are cross-cutting by nature and worthless if the model has to go looking
+ * for them, which is why they are the one thing the injection still quotes in
+ * full rather than merely indexing.
+ */
+export async function getPinnedFacts({ project, limit = 20 } = {}) {
+  return withSession(async (session) => {
+    const result = await session.run(
+      `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
+       WHERE ($project IS NULL OR e.project = $project OR e.project IS NULL)
+         AND (any(t IN $types WHERE toLower(coalesce(e.type, '')) STARTS WITH t) OR e.name = 'user')
+       WITH e, o ORDER BY o.createdAt DESC
+       LIMIT $limit
+       RETURN e.name AS entity, e.type AS type, o.text AS text`,
+      { project: project ?? null, types: PINNED_TYPES, limit: int(limit) }
+    );
+    const rows = result.records.map((r) => {
+      const row = r.toObject();
+      return { ...row, text: truncateText(row.text, BUDGETS.pinnedTextChars) };
+    });
+    return fitToBudget(rows, BUDGETS.pinnedTotalChars).kept;
+  });
+}
+
 export async function deleteObservations(entity, observationIds, project = null) {
   return withSession(async (session) => {
     const result = await session.run(

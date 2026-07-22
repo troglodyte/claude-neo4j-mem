@@ -24,6 +24,11 @@ export const BUDGETS = {
   // this never fires in normal use; it exists so one pathological observation
   // can't inflate every future read that touches its entity.
   writeTextChars: 4_000,
+  // Injected verbatim into every session alongside the subsystem map, so it is
+  // bounded hard. Measured headroom: across four live projects the largest
+  // pinned set is 28 observations / ~2.2k chars, the smallest 11 / ~855.
+  pinnedTextChars: 300,
+  pinnedTotalChars: 2_000,
 };
 
 /**
