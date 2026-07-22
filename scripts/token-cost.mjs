@@ -12,11 +12,12 @@ import * as graph from "../src/lib/graph.js";
 import { detectProject } from "../src/lib/project.js";
 import { closeDriver } from "../src/lib/neo4jClient.js";
 import { ensureSchema } from "../src/lib/schema.js";
+import { renderInjection } from "../src/lib/injection.js";
 
 // Ceilings are per single call, in characters. ~4 chars/token, so the timeline
 // ceiling is roughly 10k tokens - large, but a bounded, predictable large.
 const CEILINGS = {
-  "SessionStart injection": 14_000,
+  "SessionStart injection": 6_000,
   memory_search: 26_000,
   memory_recent: 14_000,
   memory_get_entity: 42_000,
@@ -54,11 +55,10 @@ async function measure(project) {
   const results = [];
 
   const recent = await graph.getRecentContext({ project, limit: 15 });
-  // Mirrors how session-start.js renders the same data into the prompt.
-  const injection = recent
-    .map((r) => `- ${r.name}${r.type ? ` (${r.type})` : ""}\n${r.observations.map((o) => `  - ${o}`).join("\n")}`)
-    .join("\n");
-  results.push(["SessionStart injection", injection.length, "per session, always"]);
+  const [pinned, map] = await Promise.all([graph.getPinnedFacts({ project }), graph.getSubsystemMap(project)]);
+  // Calls the hook's own renderer rather than restating its format, so this
+  // number cannot drift from what a session actually pays.
+  results.push(["SessionStart injection", renderInjection({ project, pinned, map }).length, "per session, always"]);
   results.push(["memory_search", chars(await graph.searchMemory(searchTerm, 10, project)), `query "${searchTerm}"`]);
   results.push(["memory_recent", chars(recent), "limit 15"]);
   results.push(["memory_get_entity", chars(await graph.getEntity(biggest, project)), `"${biggest}"`]);
