@@ -47,8 +47,8 @@ after(async () => {
 });
 
 test("getPinnedFacts selects standing facts and excludes one-off decisions", async () => {
-  const pinned = await graph.getPinnedFacts({ project: PROJECT });
-  const texts = pinned.map((p) => p.text);
+  const { facts } = await graph.getPinnedFacts({ project: PROJECT });
+  const texts = facts.map((p) => p.text);
 
   assert.ok(texts.some((t) => t.includes("assert on behaviour")), "preference: must pin");
   assert.ok(texts.some((t) => t.includes("Europe/London")), "user must pin");
@@ -57,10 +57,24 @@ test("getPinnedFacts selects standing facts and excludes one-off decisions", asy
 });
 
 test("getPinnedFacts enforces its character budget", async () => {
-  const pinned = await graph.getPinnedFacts({ project: PROJECT });
-  const total = JSON.stringify(pinned).length;
+  const { facts } = await graph.getPinnedFacts({ project: PROJECT });
+  const total = JSON.stringify(facts).length;
   assert.ok(total <= BUDGETS.pinnedTotalChars, `pinned payload was ${total} chars`);
-  for (const fact of pinned) {
+  for (const fact of facts) {
     assert.ok(fact.text.length <= BUDGETS.pinnedTextChars + 24, "long text must be truncated in-band");
   }
+});
+
+test("getPinnedFacts reports its own truncation rather than dropping silently", async () => {
+  const whole = await graph.getPinnedFacts({ project: PROJECT });
+  assert.equal(whole.returned, whole.facts.length);
+  assert.equal(whole.total, 3, "all three standing facts are eligible");
+  assert.equal(whole.truncated, false, "nothing is dropped when the budget has room");
+
+  // `limit` is the driver-level valve; forcing it low proves the report is
+  // wired to the real counts and not hardcoded.
+  const clipped = await graph.getPinnedFacts({ project: PROJECT, limit: 1 });
+  assert.equal(clipped.returned, 1);
+  assert.equal(clipped.total, 3, "total is the true eligible count, not the returned count");
+  assert.equal(clipped.truncated, true);
 });

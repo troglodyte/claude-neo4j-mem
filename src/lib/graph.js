@@ -309,28 +309,44 @@ export async function getRecentContext({ project, limit = 15 }) {
 // extraction model sets deliberately; the name prefix is decoration.
 const PINNED_TYPES = ["user", "preference", "constraint", "convention"];
 
+// Shared by the count and the fetch so the two can never disagree about what
+// "pinned" means - a `total` computed from a different predicate than the rows
+// would be worse than no total at all.
+const PINNED_MATCH = `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
+       WHERE ($project IS NULL OR e.project = $project OR e.project IS NULL)
+         AND (any(t IN $types WHERE toLower(coalesce(e.type, '')) STARTS WITH t) OR e.name = 'user')`;
+
 /**
  * The standing preferences and constraints injected verbatim at SessionStart.
  * These are cross-cutting by nature and worthless if the model has to go looking
  * for them, which is why they are the one thing the injection still quotes in
  * full rather than merely indexing.
+ *
+ * Returns {facts, total, returned, truncated} rather than a bare array, for the
+ * same reason getTimeline does: a caller that silently receives half the
+ * standing facts will confidently act as though it has all of them. `limit` is a
+ * driver-level safety valve set far above what the character budget will ever
+ * pass, not the effective bound - the budget is.
  */
-export async function getPinnedFacts({ project, limit = 20 } = {}) {
+export async function getPinnedFacts({ project, limit = 100 } = {}) {
   return withSession(async (session) => {
+    const params = { project: project ?? null, types: PINNED_TYPES };
+    const countResult = await session.run(`${PINNED_MATCH} RETURN count(o) AS total`, params);
+    const total = countResult.records[0]?.get("total")?.toNumber() ?? 0;
+
     const result = await session.run(
-      `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
-       WHERE ($project IS NULL OR e.project = $project OR e.project IS NULL)
-         AND (any(t IN $types WHERE toLower(coalesce(e.type, '')) STARTS WITH t) OR e.name = 'user')
+      `${PINNED_MATCH}
        WITH e, o ORDER BY o.createdAt DESC
        LIMIT $limit
        RETURN e.name AS entity, e.type AS type, o.text AS text`,
-      { project: project ?? null, types: PINNED_TYPES, limit: int(limit) }
+      { ...params, limit: int(limit) }
     );
     const rows = result.records.map((r) => {
       const row = r.toObject();
       return { ...row, text: truncateText(row.text, BUDGETS.pinnedTextChars) };
     });
-    return fitToBudget(rows, BUDGETS.pinnedTotalChars).kept;
+    const { kept } = fitToBudget(rows, BUDGETS.pinnedTotalChars);
+    return { facts: kept, total, returned: kept.length, truncated: kept.length < total };
   });
 }
 
