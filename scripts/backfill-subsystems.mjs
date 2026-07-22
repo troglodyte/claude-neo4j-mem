@@ -45,8 +45,16 @@ const SCHEMA = {
 function parseArgs(argv) {
   const flags = { project: null, dryRun: false };
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--project") flags.project = argv[++i];
-    else if (argv[i] === "--dry-run") flags.dryRun = true;
+    if (argv[i] === "--project") {
+      // --project requires a value; reject if missing or if the next token is
+      // a flag. This prevents silent scope escalation to "every project" when
+      // the user forgets to provide a project name.
+      if (i + 1 >= argv.length || argv[i + 1].startsWith("--")) {
+        console.error("Error: --project requires a value");
+        process.exit(1);
+      }
+      flags.project = argv[++i];
+    } else if (argv[i] === "--dry-run") flags.dryRun = true;
     else if (argv[i] === "--help" || argv[i] === "-h") {
       console.log("Usage: node scripts/backfill-subsystems.mjs [--project NAME] [--dry-run]");
       process.exit(0);
@@ -81,12 +89,15 @@ async function untaggedEntities(project) {
 
 async function writeTags(rows) {
   return withSession(async (session) => {
+    // Deduplicate by id (last assignment wins) so count(o) reports distinct
+    // observations touched, not inflated counts from duplicate ids.
+    const deduplicated = Array.from(new Map(rows.map((r) => [r.id, r])).values());
     const result = await session.run(
       `UNWIND $rows AS row
        MATCH (o:Observation {id: row.id})
        SET o.subsystem = row.subsystem
        RETURN count(o) AS updated`,
-      { rows }
+      { rows: deduplicated }
     );
     return result.records[0]?.get("updated").toNumber() ?? 0;
   });
