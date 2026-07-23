@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { ensureSchema } from "../lib/schema.js";
 import { detectProject } from "../lib/project.js";
 import { addObservations, createRelation, listEntityNames, listSubsystems } from "../lib/graph.js";
+import { filterVocabulary } from "../lib/subsystem.js";
 import { closeDriver, verifyConnectivity } from "../lib/neo4jClient.js";
 import { isConfigured, CONFIG_DIR, STATE_DIR, ensureStateDir } from "../lib/config.js";
 import { recordCapture } from "../lib/captureDigest.js";
@@ -51,7 +52,7 @@ function buildExtractionSystemPrompt(knownNames, knownSubsystems = []) {
   let prompt = `You extract durable, worth-remembering facts from a slice of a coding-assistant conversation transcript.
 Respond with JSON matching the given schema:
 - entities: distinct people, projects, decisions, or preferences/conventions mentioned, each as {name, type, observations}. Use short stable names (e.g. "user", "decision:auth-approach", "preference:testing", "project:<repo>"). Only include observations that would still be useful in a future, unrelated session - skip step-by-step task narration, file paths, or anything ephemeral to this one task.
-- each observation is {text, subsystem}. subsystem is a short lowercase kebab-case area of the codebase or product that the fact belongs to, e.g. "auto-capture", "search", "backup". One entity's observations may span several subsystems - tag each one on its own merits rather than giving them all the entity's topic. Omit subsystem entirely for cross-cutting facts such as user preferences or project-wide constraints.
+- each observation is {text, subsystem}. subsystem is a short lowercase kebab-case area of the codebase or product that the fact belongs to, e.g. "auto-capture", "search", "backup". One entity's observations may span several subsystems - tag each one on its own merits rather than giving them all the entity's topic. Omit subsystem entirely for cross-cutting facts such as user preferences or project-wide constraints; never invent a catch-all tag like "general", "misc" or "other", since omitting the field is how you say a fact belongs to no single subsystem.
 - relations: {from, to, type} triples linking entities, e.g. {from: "project:claude-neo4j", type: "uses", to: "neo4j-driver"}.
 If nothing is worth remembering, respond with empty arrays for both.`;
   if (knownNames.length) {
@@ -234,7 +235,9 @@ async function runCapture({ sessionId, transcriptPath, cwd, maxChunks = MAX_CHUN
 
   const project = detectProject(cwd);
   const knownNames = await listEntityNames(project);
-  const knownSubsystems = (await listSubsystems(project)).map((s) => s.subsystem);
+  // Filtered so a junk-drawer tag left in the graph by an older run can't be
+  // offered back to the model as a tag worth preferring.
+  const knownSubsystems = filterVocabulary((await listSubsystems(project)).map((s) => s.subsystem));
   const { chunks, covered, dropped } = chunkTranscript(text, CAPTURE_WINDOW_CHARS, maxChunks);
   if (dropped > 0) {
     log(

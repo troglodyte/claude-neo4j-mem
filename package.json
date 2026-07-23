@@ -1,6 +1,6 @@
 {
   "name": "claude-neo4j-memory",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Persistent, graph-based memory for Claude Code backed by Neo4j (local Docker or remote/Aura).",
   "type": "module",
   "private": true,

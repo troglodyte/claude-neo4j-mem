@@ -6,6 +6,50 @@ Version numbers track `.claude-plugin/plugin.json` and `package.json`, which are
 kept in step deliberately: `claude plugin update` compares that string, so a
 release that doesn't move it never reaches any other project.
 
+## 0.3.1 — 2026-07-23
+
+Subsystem tagging had grown a junk drawer; this empties it and closes the hole
+that produced it. Versioned rather than left unreleased because it changes
+plugin runtime code (`src/lib/subsystem.js`, `src/hooks/capture.js`), and a
+release that doesn't move the version never reaches another project.
+
+- **Fixed** a junk-drawer subsystem tag that had absorbed 315 observations —
+  20% of the whole graph, and the largest tag on two of four projects. The
+  cause was a contract mismatch, not a bad heuristic: `src/hooks/capture.js`
+  told the model to *omit* `subsystem` for cross-cutting facts and its schema
+  allowed it, while `scripts/backfill-subsystems.mjs` marked `subsystem`
+  **required** and so had to name an escape hatch (`"general"`) in its prompt
+  instead. The model then used that hatch for anything it couldn't classify:
+  268 of the 315 (85%) sat on entities that aren't cross-cutting by any
+  measure `getPinnedFacts` uses. Worse, both prompts seed their vocabulary from
+  `listSubsystems` with "prefer one of these", so one bad batch taught every
+  later batch — and every subsequent live capture — to reach for it too.
+  - `subsystem` is now optional in the backfill schema, and both prompts say to
+    omit the field rather than invent a catch-all.
+  - `resolveSubsystem` folds any catch-all name (`general`, `misc`, `other`,
+    …) to `null`, so "no subsystem" has one representation regardless of which
+    prompt or caller produced it. New `isCatchAllTag`/`filterVocabulary` in
+    `src/lib/subsystem.js`.
+  - Vocabulary shown to either extraction prompt is filtered, so a junk drawer
+    left in an older graph can't reinforce itself.
+- **Added** `--retag TAG` to `npm run backfill-subsystems`, which reclassifies
+  observations already carrying a tag. The script previously selected only
+  `subsystem IS NULL`, so a bad tag could not be revisited without clearing it
+  by hand first. Assignments that come back cross-cutting now clear the
+  property rather than being skipped.
+- **Added** a `npm run usage` warning for catch-all subsystem tags — the
+  inverse of the fragmentation warning below, which measures too *many* small
+  tags and so was structurally unable to see one oversized meaningless one.
+- **Changed** the `npm run usage` subsystem-map warning to measure the map in
+  characters, as `src/lib/injection.js` renders it, rather than counting
+  distinct tags. The count rule tracked project size: it flagged only
+  `prehire-insight`, whose 15 subsystems all hold 9+ observations and render
+  to 336 characters, and stayed silent on the project with three
+  three-observation slivers. It now fires above 800 characters (live maps run
+  170–336) and names the three smallest tags as the merge candidates. Report
+  only — it changes no plugin runtime code, and ships here because the fixes
+  above needed a release anyway.
+
 ## 0.3.0 — 2026-07-22
 
 Subsystem-tagged facts and a much smaller SessionStart injection.
@@ -53,7 +97,7 @@ See `docs/superpowers/specs/2026-07-22-subsystem-tagging-and-tiny-injection-desi
   the early batches establish is what later, smaller batches reuse.
 - **Added** an `npm run usage` hygiene warning for a fragmented subsystem map
   (a project with more than 12 distinct tags), naming the projects so
-  near-synonyms can be merged by hand.
+  near-synonyms can be merged by hand. Superseded — see Unreleased.
 
 ## 0.2.0 — 2026-07-21
 
