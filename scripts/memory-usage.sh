@@ -124,18 +124,59 @@ ${ORPHANS}
 "
 fi
 
-# Too many subsystem tags means the map they feed has stopped being a map. The
-# usual cause is near-synonyms ("capture" and "auto-capture") that the lexical
-# deduper can't merge because they aren't lexically close.
+# A fragmented map is one that has stopped being a table of contents, usually
+# because of near-synonyms ("capture" and "auto-capture") the lexical deduper
+# can't merge. Counting distinct tags measures project size instead: a real
+# 818-observation product carried 15 subsystems, none holding fewer than 9
+# observations, and tripped a `tags > 12` rule that a half-empty project with
+# three one-observation slivers slipped under.
+#
+# So this measures what the map costs to read, the same way every path in
+# src/lib/budget.js is bounded by characters rather than by rows - the map is
+# injected into every session, and a tag's name length matters as much as the
+# tag count. Cells are sized as src/lib/injection.js renders them:
+# "<tag> (<n>, MM-DD)" joined by " . ", i.e. tag + digits + 10, plus 3 per gap.
+# Live maps measure 170-336 chars, so 800 is roughly 30 average tags: past that
+# the map is both expensive per session and too long to skim. The smallest tags
+# are named because they are the merge candidates.
 TAGS="$(run_query "
 MATCH (o:Observation)-[:ABOUT]->(e:Entity) WHERE o.subsystem IS NOT NULL
-WITH e.project AS project, count(DISTINCT o.subsystem) AS tags
-WHERE tags > 12
-RETURN '  ' + coalesce(project,'no project') + ': ' + toString(tags) + ' distinct subsystems' AS row
-ORDER BY tags DESC;")"
+WITH e.project AS project, o.subsystem AS tag, count(o) AS n
+ORDER BY n ASC
+WITH project, collect(tag + ' (' + toString(n) + ')') AS smallest,
+     collect(size(tag) + size(toString(n)) + 10) AS lens, count(tag) AS tags
+WITH project, tags, smallest,
+     reduce(total = 0, l IN lens | total + l) + 3 * (tags - 1) AS chars
+WHERE chars > 800
+RETURN '  ' + coalesce(project,'no project') + ': ' + toString(chars) + ' chars across ' +
+       toString(tags) + ' subsystems; smallest are ' +
+       reduce(s = '', c IN smallest[0..3] | CASE WHEN s = '' THEN c ELSE s + ', ' + c END) AS row
+ORDER BY chars DESC;")"
 if [ -n "$TAGS" ]; then
-  WARNINGS="${WARNINGS}Projects with a fragmented subsystem map (merge near-synonyms):
+  WARNINGS="${WARNINGS}Projects whose subsystem map is costly to inject every session (merge near-synonyms):
 ${TAGS}
+
+"
+fi
+
+# The opposite failure to fragmentation, and invisible to the check above: one
+# tag that isn't a subsystem at all. A mandatory `subsystem` field in the
+# backfill's schema once left the model no way to say "cross-cutting", so its
+# prompt named an escape hatch and 20% of every project's history ended up
+# behind it - 85% of that not cross-cutting, merely unclassified. Cross-cutting
+# facts are stored with no subsystem now (they are surfaced by the pinned-facts
+# block instead), so any of these names in the graph is either pre-fix data or
+# a hand-written Cypher update. src/lib/subsystem.js holds the same list.
+JUNK="$(run_query "
+MATCH (o:Observation)-[:ABOUT]->(e:Entity)
+WHERE o.subsystem IN ['general','misc','miscellaneous','other','others','uncategorized',
+                      'uncategorised','unclassified','various','untagged','none','n-a']
+WITH e.project AS project, o.subsystem AS tag, count(o) AS n
+RETURN '  ' + coalesce(project,'no project') + ': ' + tag + ' holds ' + toString(n) + ' observation(s)' AS row
+ORDER BY n DESC;")"
+if [ -n "$JUNK" ]; then
+  WARNINGS="${WARNINGS}Catch-all subsystem tags (reclassify: npm run backfill-subsystems -- --retag TAG):
+${JUNK}
 
 "
 fi
