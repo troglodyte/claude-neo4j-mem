@@ -205,15 +205,20 @@ next runs, so right after a push `origin/main` is ahead of the clone, which is
 ahead of the snapshot. That's normal. What matters is whether the *snapshot*
 is missing code you depend on.
 
-`autoUpdate: true` refreshes the *clone*; it does not re-copy the clone into
-the cached install, so `installed_plugins.json` keeps its old `gitCommitSha`
-and every non-this-repo session loads the old code. The snapshot is a plain
-copy, not a git checkout, so `git log` inside it fails — compare it with
+`autoUpdate: true` refreshes the *clone*, and re-copies it into the cached
+install **only when the version moved** — which is the whole mechanism behind
+the bump rule below. Push within a version and `installed_plugins.json` keeps
+its old `gitCommitSha` while every non-this-repo session loads the old code;
+bump it and the next autoUpdate lands the new snapshot unattended, with no
+`claude plugin update` run at all. The snapshot is a plain copy, not a git
+checkout, so `git log` inside it fails — compare it with
 `diff -rq <snapshot>/src <clone>/src` instead.
 
 The snapshot path contains the **version**, so a version bump changes it and
 orphans the old directory. Glob the version component rather than hardcoding
-it, or you will grep a directory nothing loads from.
+it, or you will grep a directory nothing loads from. Nothing prunes the
+orphan — it is a full copy, tens of MB, and safe to delete once no
+`installPath` in `installed_plugins.json` names it.
 
 **`claude plugin update` is a no-op unless the version changed** — it compares
 the `version` in `.claude-plugin/plugin.json`, and there is no `--force`. So
@@ -235,9 +240,14 @@ Stale-snapshot failures are hard to read as such: when captures in other repos
 timed out, the message was indistinguishable from a genuine timeout except for
 the *value* (`90000ms`, the snapshot's old constant, against a HEAD that had
 moved to `180_000`). **Check the numbers in the error, not just the failure.**
-The project-scope record in `installed_plugins.json` also carries its own,
-older `gitCommitSha` — harmless, since it shares an `installPath` with the
-user-scope entry, but it will mislead anyone reading that file.
+**`claude plugin uninstall --scope project` rewrites `.claude/settings.json`
+and takes the `enabledPlugins` disable with it.** This repo carried a stale
+project-scope record from an early install, pinned to its own older
+`gitCommitSha`; once the version bump gave it a separate `installPath` it was
+no longer merely cosmetic, so it was uninstalled — and that silently
+re-enabled the marketplace copy here, the one thing that file exists to
+prevent. The file is tracked, so `git diff` catches it. Check the working
+tree after any `claude plugin` command run inside this repo.
 
 ## Open
 
