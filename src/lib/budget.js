@@ -24,6 +24,14 @@ export const BUDGETS = {
   // this never fires in normal use; it exists so one pathological observation
   // can't inflate every future read that touches its entity.
   writeTextChars: 4_000,
+  // Injected verbatim into every session alongside the subsystem map. Sized to
+  // fit the largest real pinned set whole - 28 observations at ~138 chars each
+  // is ~3.9k - because a standing preference the model never sees may as well
+  // not exist. An earlier 2_000 silently dropped half the standing facts on
+  // three of four live projects; the ceiling stays only as a backstop against a
+  // project that accumulates far more, and getPinnedFacts reports when it bites.
+  pinnedTextChars: 300,
+  pinnedTotalChars: 4_000,
 };
 
 /**

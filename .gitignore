@@ -2,3 +2,5 @@ node_modules/
 docker/.env
 *.log
 .claude/settings.local.json
+
+.superpowers/

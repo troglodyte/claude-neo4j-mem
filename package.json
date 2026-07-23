@@ -1,11 +1,11 @@
 {
   "name": "claude-neo4j-memory",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Persistent, graph-based memory for Claude Code backed by Neo4j (local Docker or remote/Aura).",
   "type": "module",
   "private": true,
   "scripts": {
-    "test": "bash tests/launcher-path.test.sh",
+    "test": "bash tests/launcher-path.test.sh && node --test tests/**/*.test.js",
     "configure": "node scripts/configure.mjs",
     "mcp-server": "node src/mcp/server.js",
     "memory": "node scripts/memory-cli.mjs",
@@ -13,7 +13,8 @@
     "backup": "bash scripts/backup.sh",
     "restore": "bash scripts/restore.sh",
     "token-cost": "node scripts/token-cost.mjs",
-    "migrate-claude-mem": "node scripts/migrate-from-claude-mem.mjs"
+    "migrate-claude-mem": "node scripts/migrate-from-claude-mem.mjs",
+    "backfill-subsystems": "node scripts/backfill-subsystems.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.19.0",

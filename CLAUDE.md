@@ -215,7 +215,7 @@ summarizes a silently-shortened history. Measured on `prehire-insight`:
 | `memory_timeline` (default) | ~59.7k tok | ~8.0k tok |
 | `memory_timeline` (max limit) | ~300k tok | hard-capped ~10k tok |
 | `memory_get_entity` (uncapped) | ~53.7k tok | ~8.4k tok |
-| SessionStart injection | ~4.2k tok | ~2.3k tok |
+| SessionStart injection | ~4.2k tok | 668 tok (2,672 chars on `claude-neo4j-mem`, after the 2026-07-22 subsystem-tagging injection redesign — see below) |
 | `memory_search` | ~5.6k tok | ~3.2k tok |
 
 `npm run token-cost [-- --all]` measures every read path against a per-call
@@ -340,6 +340,39 @@ Follow-ups this leaves open:
 - After a version bump, the previous version's directory is orphaned under
   `~/.claude/plugins/cache/claude-neo4j-local/neo4j-memory/`. Nothing loads it;
   delete it if it is confusing you.
+
+## Subsystem tagging and a tiny SessionStart injection (2026-07-22)
+
+Replaced the per-session recency dump with two cheaper, more targeted pieces:
+**pinned standing facts** (`getPinnedFacts`) and a **compact subsystem
+index** (`getSubsystemMap`), rendered together by `src/lib/injection.js`.
+Measured on `claude-neo4j-mem`: the injection went from ~6.4k characters /
+~2.3k tokens to **2,672 characters / 668 tokens**; all four real projects now
+land between 1,232 and 2,672 characters.
+
+- **Pinned facts are budgeted by characters, not row count.** `getPinnedFacts`
+  returns `{facts, total, returned, truncated}` off a `pinnedTotalChars: 4000`
+  / `pinnedTextChars: 300` budget in `src/lib/budget.js`. An earlier
+  `pinnedTotalChars: 2000` silently returned only 14, 11, 12, 12 of the
+  eligible standing facts on the four real projects; at 4,000 chars all four
+  now return every eligible fact (28/28, 15/15, 18/18, 12/12) with
+  `truncated: false`.
+- **Why the tag lives on the observation, not the entity.** The entities most
+  in need of slicing are exactly the ones that already span several
+  subsystems — `plugin:neo4j-memory` alone holds 65 observations spanning
+  auto-capture, search, backup, and marketplace installs. Tagging the entity
+  wouldn't separate any of that; tagging each observation does.
+- **New/changed public surface**: a `subsystem` parameter on `memory_search`,
+  `memory_recent`, and `memory_timeline`; a call-level `subsystem` on
+  `memory_add_observations`; `npm run backfill-subsystems` to tag
+  pre-existing observations; `src/lib/extract.js`, the spawn/timeout/parse
+  logic lifted out of `capture.js` so auto-capture and the backfill script
+  share one copy instead of drifting independently.
+- **`npm run usage` now warns when a project's subsystem map has fragmented**
+  (more than 12 distinct tags) — the usual cause is near-synonyms (`capture`
+  vs. `auto-capture`) that the lexical deduper can't merge because they
+  aren't lexically close. The warning names the affected project(s) so the
+  near-synonyms can be merged by hand.
 
 ## Likely next steps
 

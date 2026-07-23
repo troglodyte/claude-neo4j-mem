@@ -16,18 +16,24 @@ Works against either:
 
 ## How it works
 
-- **`SessionStart` hook** queries the graph for the current project's most
-  relevant recent entities/observations and injects them as context, plus a
-  note telling Claude which memory tools are available. It also prints a short
-  visible banner in the terminal (e.g. `🧠 Neo4j memory: loaded 12
-  observation(s) across 5 entities for <project>.`) — or, if the plugin isn't
-  configured or Neo4j isn't reachable yet, a banner pointing you at
-  `scripts/setup-local.sh` / `README.md` instead of failing silently.
+- **`SessionStart` hook** injects a compact, fixed-cost snapshot of the current
+  project's memory: the standing facts that always apply (user preferences and
+  constraints, quoted verbatim) followed by a one-line-per-subsystem index of
+  everything else, so Claude knows what exists and can `memory_search` into it
+  rather than being handed a recency dump. It also prints a short visible banner
+  in the terminal (e.g. `🧠 Neo4j memory: 223 observation(s) across 6
+  subsystem(s) for <project>.`) — or, if the plugin isn't configured or Neo4j
+  isn't reachable yet, a banner pointing you at `scripts/setup-local.sh` /
+  `README.md` instead of failing silently.
 - **MCP server** (`neo4j-memory`) exposes tools Claude can call any time during
   a session: `memory_search`, `memory_get_entity`, `memory_recent`,
   `memory_add_observations`, `memory_create_relation`,
   `memory_delete_observations`, `memory_delete_entity`, `memory_prune`,
-  `memory_timeline`, `memory_status`. The write tools (`memory_add_observations`,
+  `memory_timeline`, `memory_status`. Every observation carries a `subsystem`
+  tag (e.g. `capture`, `search`, `backup`) inferred at write time; `memory_search`,
+  `memory_recent`, and `memory_timeline` all accept an optional `subsystem`
+  parameter to scope a read to one tag, and `memory_add_observations` accepts
+  a call-level `subsystem` to tag the whole batch being written. The write tools (`memory_add_observations`,
   `memory_create_relation`, `memory_delete_observations`,
   `memory_delete_entity`, `memory_prune`) return a `confirmation` string that
   Claude relays as a short line (e.g. "🧠 remembered 2 observation(s) on ...")
@@ -214,6 +220,12 @@ the configure wizard against it using the credentials in `docker/.env`.
   session.
 - `scripts/check-health.sh` — verifies Docker container health, plugin config,
   Neo4j auth, and the MCP handshake in one shot.
+- `npm run backfill-subsystems` — tags pre-existing observations that predate
+  subsystem tagging. Idempotent and resumable (only ever selects
+  `subsystem IS NULL`, writes per batch), and processes entities largest-first
+  per project so the vocabulary early batches establish is what later,
+  smaller batches reuse. `--dry-run` previews without writing; `--project`
+  scopes to one project.
 - A statusline showing `<model> · 🧠 <entities>e/<observations>o` can be wired
   via `scripts/statusline.mjs` (see `.claude/settings.local.json`).
 - The full graph is also browsable directly in Neo4j's own UI at

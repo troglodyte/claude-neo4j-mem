@@ -23,10 +23,14 @@ function errorResult(error) {
 server.tool(
   "memory_search",
   "Full-text search the Neo4j memory graph for entities and observations matching a query. Returns matching entities with their most recent observations and directly related entities.",
-  { query: z.string().describe("Search text"), limit: z.number().int().min(1).max(50).optional() },
-  async ({ query, limit }) => {
+  {
+    query: z.string().describe("Search text"),
+    limit: z.number().int().min(1).max(50).optional(),
+    subsystem: z.string().optional().describe("Narrow to one subsystem tag, as listed in the SessionStart memory map"),
+  },
+  async ({ query, limit, subsystem }) => {
     try {
-      return textResult(await graph.searchMemory(query, limit ?? 10, project));
+      return textResult(await graph.searchMemory(query, limit ?? 10, project, { subsystem }));
     } catch (error) {
       return errorResult(error);
     }
@@ -54,10 +58,19 @@ server.tool(
     entity: z.string().describe("Entity name, e.g. 'user', 'decision:auth-approach', 'preference:testing'"),
     entityType: z.string().optional().describe("e.g. person, project, decision, preference, fact"),
     observations: z.array(z.string()).min(1),
+    subsystem: z
+      .string()
+      .optional()
+      .describe("Area this batch belongs to, e.g. 'auto-capture', 'search'. Reuse a tag from the SessionStart memory map when one fits; omit for cross-cutting facts like user preferences."),
   },
-  async ({ entity, entityType, observations }) => {
+  async ({ entity, entityType, observations, subsystem }) => {
     try {
-      const ids = await graph.addObservations({ entity, entityType, observations, project });
+      const ids = await graph.addObservations({
+        entity,
+        entityType,
+        observations: observations.map((text) => ({ text, subsystem })),
+        project,
+      });
       const result = { entity, added: ids.length, observationIds: ids };
       if (shouldNotifyOnWrite()) {
         result.confirmation = `remembered ${ids.length} observation(s) on "${entity}"`;
@@ -90,10 +103,13 @@ server.tool(
 server.tool(
   "memory_recent",
   "List the most recently updated entities and their latest observations, scoped to the current project when possible. Useful as a general 'what do you remember' refresh.",
-  { limit: z.number().int().min(1).max(50).optional() },
-  async ({ limit }) => {
+  {
+    limit: z.number().int().min(1).max(50).optional(),
+    subsystem: z.string().optional().describe("Narrow to one subsystem tag"),
+  },
+  async ({ limit, subsystem }) => {
     try {
-      return textResult(await graph.getRecentContext({ project, limit: limit ?? 15 }));
+      return textResult(await graph.getRecentContext({ project, limit: limit ?? 15, subsystem }));
     } catch (error) {
       return errorResult(error);
     }
@@ -168,10 +184,11 @@ server.tool(
   {
     since: z.string().optional().describe("ISO 8601 date/time; only observations at or after this point are returned"),
     limit: z.number().int().min(1).max(500).optional().describe("Max events to return (default 100)"),
+    subsystem: z.string().optional().describe("Narrow to one subsystem tag"),
   },
-  async ({ since, limit }) => {
+  async ({ since, limit, subsystem }) => {
     try {
-      return textResult(await graph.getTimeline({ project, since, limit: limit ?? 100 }));
+      return textResult(await graph.getTimeline({ project, since, limit: limit ?? 100, subsystem }));
     } catch (error) {
       return errorResult(error);
     }

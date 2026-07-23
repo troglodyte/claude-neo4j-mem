@@ -12,6 +12,9 @@ const STATEMENTS = [
   "CREATE CONSTRAINT observation_id_unique IF NOT EXISTS FOR (o:Observation) REQUIRE o.id IS UNIQUE",
   "CREATE FULLTEXT INDEX entityNameFulltext IF NOT EXISTS FOR (e:Entity) ON EACH [e.name]",
   "CREATE FULLTEXT INDEX observationTextFulltext IF NOT EXISTS FOR (o:Observation) ON EACH [o.text]",
+  // A low-cardinality label filtered as an exact-match predicate on read paths
+  // that already narrow by project - a plain range index, not a fulltext one.
+  "CREATE INDEX observation_subsystem IF NOT EXISTS FOR (o:Observation) ON (o.subsystem)",
 ];
 
 let ensured = false;

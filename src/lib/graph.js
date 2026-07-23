@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { withSession, int } from "./neo4jClient.js";
 import { resolveCanonicalName } from "./dedup.js";
+import { resolveSubsystem, UNTAGGED } from "./subsystem.js";
 import { BUDGETS, truncateText, fitToBudget } from "./budget.js";
 
 // Callers search with plain phrases and with entity names, and this plugin's
@@ -46,6 +47,60 @@ export async function listEntityNames(project) {
   });
 }
 
+/**
+ * The project's existing subsystem vocabulary, most-used first. Fed to the
+ * extraction prompt and to the write path so new tags converge on the ones
+ * already in use instead of fragmenting.
+ */
+export async function listSubsystems(project) {
+  return withSession(async (session) => {
+    const result = await session.run(
+      `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
+       WHERE ($project IS NULL OR e.project = $project OR e.project IS NULL)
+         AND o.subsystem IS NOT NULL
+       RETURN o.subsystem AS subsystem, count(o) AS observations
+       ORDER BY observations DESC, subsystem ASC`,
+      { project: project ?? null }
+    );
+    return result.records.map((r) => ({
+      subsystem: r.get("subsystem"),
+      observations: r.get("observations").toNumber(),
+    }));
+  });
+}
+
+/**
+ * A table of contents for the project's memory: one row per subsystem tag with
+ * counts and recency. Deliberately an aggregate rather than a sample - its size
+ * is bounded by tag cardinality, not by how much text the graph holds, so it
+ * costs the same on a 200-observation project and a 20,000-observation one.
+ * That is what lets the SessionStart injection stop growing with the graph.
+ *
+ * Untagged observations get their own row rather than being dropped: an honest
+ * count of what hasn't been classified beats a tidy short list.
+ */
+export async function getSubsystemMap(project) {
+  return withSession(async (session) => {
+    const result = await session.run(
+      `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
+       WHERE $project IS NULL OR e.project = $project OR e.project IS NULL
+       WITH coalesce(o.subsystem, $untagged) AS subsystem, o, e
+       RETURN subsystem,
+              count(o) AS observations,
+              count(DISTINCT e) AS entities,
+              toString(max(o.createdAt)) AS lastSeen
+       ORDER BY lastSeen DESC`,
+      { project: project ?? null, untagged: UNTAGGED }
+    );
+    return result.records.map((r) => ({
+      subsystem: r.get("subsystem"),
+      observations: r.get("observations").toNumber(),
+      entities: r.get("entities").toNumber(),
+      lastSeen: r.get("lastSeen"),
+    }));
+  });
+}
+
 export async function upsertSession({ id, cwd, project }) {
   return withSession(async (session) => {
     await session.run(
@@ -56,19 +111,33 @@ export async function upsertSession({ id, cwd, project }) {
   });
 }
 
-// `existingNames` lets a caller writing several entities in a row fetch the
-// name list once instead of per call. It used to be fetched inside the session
-// below - a nested session acquisition plus a full re-scan of every entity name
-// on each call, so one 8-entity capture opened 16 sessions and ran the same
-// scan 8 times.
-export async function addObservations({ entity, entityType, observations, sessionId, project, existingNames }) {
-  // Bounded on the way in, so one runaway observation can't inflate every
-  // future read that touches this entity.
-  const rows = observations.map((text) => ({
-    id: randomUUID(),
-    text: truncateText(text, BUDGETS.writeTextChars),
-  }));
+// `existingNames`/`existingSubsystems` let a caller writing several entities
+// in a row fetch these lists once instead of per call. They used to be
+// fetched inside the session below - a nested session acquisition plus a
+// full re-scan on each call, so one 8-entity capture opened 16 sessions and
+// ran the same scans 8 times.
+export async function addObservations({
+  entity,
+  entityType,
+  observations,
+  sessionId,
+  project,
+  existingNames,
+  existingSubsystems,
+}) {
   const names = existingNames ?? (await listEntityNames(project));
+  const knownSubsystems = existingSubsystems ?? (await listSubsystems(project)).map((s) => s.subsystem);
+  // Accepts a plain string or {text, subsystem}: the MCP tool and the CLI pass
+  // strings, auto-capture and the backfill pass objects. Bounded on the way in,
+  // so one runaway observation can't inflate every future read of this entity.
+  const rows = observations.map((item) => {
+    const { text, subsystem } = typeof item === "string" ? { text: item, subsystem: null } : item;
+    return {
+      id: randomUUID(),
+      text: truncateText(text, BUDGETS.writeTextChars),
+      subsystem: resolveSubsystem(subsystem, knownSubsystems),
+    };
+  });
   entity = resolveCanonicalName(entity, names);
   await withSession(async (session) => {
     await upsertEntity(session, entity, entityType, project);
@@ -76,7 +145,7 @@ export async function addObservations({ entity, entityType, observations, sessio
       `MATCH (e:Entity {name: $entity})
        WHERE ($project IS NOT NULL AND e.project = $project) OR ($project IS NULL AND e.project IS NULL)
        UNWIND $rows AS row
-       CREATE (o:Observation {id: row.id, text: row.text, createdAt: datetime(), sessionId: $sessionId})
+       CREATE (o:Observation {id: row.id, text: row.text, subsystem: row.subsystem, createdAt: datetime(), sessionId: $sessionId})
        CREATE (o)-[:ABOUT]->(e)
        WITH o
        CALL {
@@ -109,14 +178,18 @@ export async function createRelation({ from, to, type, project }) {
   });
 }
 
-export async function searchMemory(query, limit = 10, project = null) {
+export async function searchMemory(query, limit = 10, project = null, { subsystem = null } = {}) {
   return withSession(async (session) => {
     const result = await session.run(
       `CALL {
          CALL db.index.fulltext.queryNodes('entityNameFulltext', $query) YIELD node, score
-         RETURN node AS entity, score
+         WITH node AS entity, score
+         WHERE $subsystem IS NULL
+            OR EXISTS { MATCH (o:Observation)-[:ABOUT]->(entity) WHERE o.subsystem = $subsystem }
+         RETURN entity, score
          UNION
          CALL db.index.fulltext.queryNodes('observationTextFulltext', $query) YIELD node, score
+         WHERE $subsystem IS NULL OR node.subsystem = $subsystem
          MATCH (node)-[:ABOUT]->(entity)
          RETURN entity, score
        }
@@ -136,6 +209,7 @@ export async function searchMemory(query, limit = 10, project = null) {
        CALL {
          WITH entity
          CALL db.index.fulltext.queryNodes('observationTextFulltext', $query) YIELD node, score AS obsScore
+         WHERE $subsystem IS NULL OR node.subsystem = $subsystem
          MATCH (node)-[:ABOUT]->(entity)
          RETURN node.text AS text
          ORDER BY obsScore DESC
@@ -145,6 +219,7 @@ export async function searchMemory(query, limit = 10, project = null) {
        // Top up with recent observations so an entity matched only by name
        // (or by fewer than five observations) still comes back with context.
        OPTIONAL MATCH (o:Observation)-[:ABOUT]->(entity)
+       WHERE $subsystem IS NULL OR o.subsystem = $subsystem
        WITH entity, rankScore, matched, o
        ORDER BY o.createdAt DESC
        WITH entity, rankScore, matched, collect(o.text) AS recent
@@ -155,7 +230,7 @@ export async function searchMemory(query, limit = 10, project = null) {
        WITH entity, rankScore, observations, [x IN relationsRaw WHERE x IS NOT NULL] AS relations
        RETURN entity.name AS name, entity.type AS type, rankScore AS score, observations, relations
        ORDER BY rankScore DESC`,
-      { query: escapeLuceneQuery(query), limit: int(limit), project: project ?? null }
+      { query: escapeLuceneQuery(query), limit: int(limit), project: project ?? null, subsystem }
     );
     const rows = result.records.map((r) => {
       const row = r.toObject();
@@ -210,18 +285,19 @@ export async function getEntity(name, project = null, { limit = 50 } = {}) {
   });
 }
 
-export async function getRecentContext({ project, limit = 15 }) {
+export async function getRecentContext({ project, limit = 15, subsystem = null }) {
   return withSession(async (session) => {
     const result = await session.run(
       `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
-       WHERE $project IS NULL OR e.project = $project OR e.project IS NULL
+       WHERE ($project IS NULL OR e.project = $project OR e.project IS NULL)
+         AND ($subsystem IS NULL OR o.subsystem = $subsystem)
        WITH e, o ORDER BY o.createdAt DESC
        WITH e, collect(o.text)[0..3] AS observations, max(o.createdAt) AS lastSeen
        ORDER BY lastSeen DESC
        LIMIT $limit
        RETURN e.name AS name, e.type AS type, observations
        ORDER BY lastSeen DESC`,
-      { project: project ?? null, limit: int(limit) }
+      { project: project ?? null, limit: int(limit), subsystem }
     );
     // This is the SessionStart injection, paid once per session on every
     // session, so it gets the tightest budget of any read path.
@@ -230,6 +306,54 @@ export async function getRecentContext({ project, limit = 15 }) {
       return { ...row, observations: row.observations.map((t) => truncateText(t, BUDGETS.recentTextChars)) };
     });
     return fitToBudget(rows, BUDGETS.recentTotalChars).kept;
+  });
+}
+
+// Entity types whose observations always apply, whatever this session is about.
+// Matched by prefix against `type` rather than against the name, because the two
+// drift in real data: "architecture:docker-env-to-config" is typed "decision",
+// and one live entity is typed "Constraint Amendment". `type` is what the
+// extraction model sets deliberately; the name prefix is decoration.
+const PINNED_TYPES = ["user", "preference", "constraint", "convention"];
+
+// Shared by the count and the fetch so the two can never disagree about what
+// "pinned" means - a `total` computed from a different predicate than the rows
+// would be worse than no total at all.
+const PINNED_MATCH = `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
+       WHERE ($project IS NULL OR e.project = $project OR e.project IS NULL)
+         AND (any(t IN $types WHERE toLower(coalesce(e.type, '')) STARTS WITH t) OR e.name = 'user')`;
+
+/**
+ * The standing preferences and constraints injected verbatim at SessionStart.
+ * These are cross-cutting by nature and worthless if the model has to go looking
+ * for them, which is why they are the one thing the injection still quotes in
+ * full rather than merely indexing.
+ *
+ * Returns {facts, total, returned, truncated} rather than a bare array, for the
+ * same reason getTimeline does: a caller that silently receives half the
+ * standing facts will confidently act as though it has all of them. `limit` is a
+ * driver-level safety valve set far above what the character budget will ever
+ * pass, not the effective bound - the budget is.
+ */
+export async function getPinnedFacts({ project, limit = 100 } = {}) {
+  return withSession(async (session) => {
+    const params = { project: project ?? null, types: PINNED_TYPES };
+    const countResult = await session.run(`${PINNED_MATCH} RETURN count(o) AS total`, params);
+    const total = countResult.records[0]?.get("total")?.toNumber() ?? 0;
+
+    const result = await session.run(
+      `${PINNED_MATCH}
+       WITH e, o ORDER BY o.createdAt DESC
+       LIMIT $limit
+       RETURN e.name AS entity, e.type AS type, o.text AS text`,
+      { ...params, limit: int(limit) }
+    );
+    const rows = result.records.map((r) => {
+      const row = r.toObject();
+      return { ...row, text: truncateText(row.text, BUDGETS.pinnedTextChars) };
+    });
+    const { kept } = fitToBudget(rows, BUDGETS.pinnedTotalChars);
+    return { facts: kept, total, returned: kept.length, truncated: kept.length < total };
   });
 }
 
@@ -269,6 +393,7 @@ export async function getTimeline({
   project,
   since,
   limit = 100,
+  subsystem = null,
   maxTextChars = BUDGETS.timelineTextChars,
   maxTotalChars = BUDGETS.timelineTotalChars,
 } = {}) {
@@ -277,8 +402,9 @@ export async function getTimeline({
       `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
        WHERE ($project IS NULL OR e.project = $project OR e.project IS NULL)
          AND ($since IS NULL OR o.createdAt >= datetime($since))
+         AND ($subsystem IS NULL OR o.subsystem = $subsystem)
        RETURN count(o) AS total`,
-      { project: project ?? null, since: since ?? null }
+      { project: project ?? null, since: since ?? null, subsystem }
     );
     const total = countResult.records[0]?.get("total")?.toNumber() ?? 0;
 
@@ -286,10 +412,11 @@ export async function getTimeline({
       `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
        WHERE ($project IS NULL OR e.project = $project OR e.project IS NULL)
          AND ($since IS NULL OR o.createdAt >= datetime($since))
+         AND ($subsystem IS NULL OR o.subsystem = $subsystem)
        RETURN e.name AS entity, e.type AS type, o.text AS text, toString(o.createdAt) AS createdAt
        ORDER BY o.createdAt ASC
        LIMIT $limit`,
-      { project: project ?? null, since: since ?? null, limit: int(limit) }
+      { project: project ?? null, since: since ?? null, limit: int(limit), subsystem }
     );
 
     const rows = result.records.map((r) => {

@@ -4,7 +4,9 @@ import path from "node:path";
 import { homedir } from "node:os";
 import { ensureSchema } from "../lib/schema.js";
 import { detectProject } from "../lib/project.js";
-import { upsertSession, getRecentContext, getStatus } from "../lib/graph.js";
+import { upsertSession, getPinnedFacts, getSubsystemMap } from "../lib/graph.js";
+import { renderInjection } from "../lib/injection.js";
+import { UNTAGGED } from "../lib/subsystem.js";
 import { closeDriver, verifyConnectivity } from "../lib/neo4jClient.js";
 import { isConfigured } from "../lib/config.js";
 import { consumeCaptureDigest } from "../lib/captureDigest.js";
@@ -44,16 +46,6 @@ async function claudeMemMigrationHint(project, cwd) {
   }
 }
 
-const TOOLS_BLURB =
-  "You have a persistent Neo4j-backed memory graph available via MCP tools: memory_search, " +
-  "memory_get_entity, memory_recent, memory_add_observations, memory_create_relation, " +
-  "memory_delete_observations, memory_delete_entity, memory_prune, memory_list_projects, " +
-  "memory_status. Call " +
-  "memory_add_observations when you learn a durable fact, decision, or preference worth keeping " +
-  "beyond this session (automatic capture also runs at compaction and session end as a backstop, " +
-  "so you don't need to log everything manually). memory_prune deletes old observations - only " +
-  "call it with dryRun: false if the user explicitly asks to clean up/prune old memories.";
-
 const SETUP_HINT =
   "Run scripts/setup-local.sh (needs Docker; generates docker/.env and starts the container for you) " +
   "to get a local Neo4j running and configured, or `node scripts/configure.mjs --mode remote --uri ...` " +
@@ -78,18 +70,17 @@ async function main() {
 
     const project = detectProject(cwd);
     await upsertSession({ id: sessionId, cwd, project });
-    const recent = await getRecentContext({ project, limit: 15 });
 
-    let additionalContext = `## Memory (Neo4j, project: ${project})\n${TOOLS_BLURB}`;
+    const [pinned, map] = await Promise.all([getPinnedFacts({ project }), getSubsystemMap(project)]);
+    const additionalContext = renderInjection({ project, pinned, map });
+
     let systemMessage;
-    if (recent.length > 0) {
-      const lines = recent.map((r) => {
-        const obs = r.observations.map((o) => `  - ${o}`).join("\n");
-        return `- ${r.name}${r.type ? ` (${r.type})` : ""}\n${obs}`;
-      });
-      additionalContext += `\n\nRelevant facts from past sessions:\n\n${lines.join("\n")}`;
-      const observationCount = recent.reduce((sum, r) => sum + r.observations.length, 0);
-      systemMessage = `\u{1f9e0} Neo4j memory: loaded ${observationCount} observation(s) across ${recent.length} entit${recent.length === 1 ? "y" : "ies"} for ${project}.`;
+    if (map.length > 0) {
+      const observationCount = map.reduce((sum, row) => sum + row.observations, 0);
+      const tagCount = map.filter((row) => row.subsystem !== UNTAGGED).length;
+      systemMessage =
+        `\u{1f9e0} Neo4j memory: ${observationCount} observation(s) across ${tagCount} ` +
+        `subsystem(s) for ${project}.`;
     } else {
       systemMessage = `\u{1f9e0} Neo4j memory: connected, nothing remembered yet for ${project}.`;
       const claudeMemCount = await claudeMemMigrationHint(project, cwd);

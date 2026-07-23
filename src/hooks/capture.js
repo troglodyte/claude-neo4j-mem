@@ -5,10 +5,11 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { ensureSchema } from "../lib/schema.js";
 import { detectProject } from "../lib/project.js";
-import { addObservations, createRelation, listEntityNames } from "../lib/graph.js";
+import { addObservations, createRelation, listEntityNames, listSubsystems } from "../lib/graph.js";
 import { closeDriver, verifyConnectivity } from "../lib/neo4jClient.js";
 import { isConfigured, CONFIG_DIR, STATE_DIR, ensureStateDir } from "../lib/config.js";
 import { recordCapture } from "../lib/captureDigest.js";
+import { extractStructured } from "../lib/extract.js";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const LOG_FILE = path.join(CONFIG_DIR, "capture.log");
@@ -38,12 +39,6 @@ const MAX_CAPTURE_ATTEMPTS = 3;
 // only sweep ones old enough that no in-flight worker could still hold them.
 const RETRY_AFTER_MS = 10 * 60 * 1000;
 const STATE_FILE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-// Model alias, not a raw ID: passed straight through to `claude --model`.
-const CAPTURE_MODEL = process.env.CLAUDE_NEO4J_CAPTURE_MODEL ?? "haiku";
-// Headless Claude Code CLI, not the Anthropic SDK: rides on the user's own
-// logged-in session (OAuth/subscription), so auto-capture doesn't need a
-// separate ANTHROPIC_API_KEY. Same trick claude-mem uses.
-const CLAUDE_BIN = process.env.CLAUDE_NEO4J_CAPTURE_CLI ?? "claude";
 // Extraction measures ~11s for a full 50k-char window, so these are outlier
 // headroom rather than expected duration: observed timeouts came from
 // contention, not from the size of the input. The detached worker answers to
@@ -52,19 +47,26 @@ const CLAUDE_BIN = process.env.CLAUDE_NEO4J_CAPTURE_CLI ?? "claude";
 const CAPTURE_TIMEOUT_MS = Number(process.env.CLAUDE_NEO4J_CAPTURE_TIMEOUT_MS ?? 180_000);
 const PRECOMPACT_TIMEOUT_MS = 80_000;
 
-function buildExtractionSystemPrompt(knownNames) {
-  const base = `You extract durable, worth-remembering facts from a slice of a coding-assistant conversation transcript.
+function buildExtractionSystemPrompt(knownNames, knownSubsystems = []) {
+  let prompt = `You extract durable, worth-remembering facts from a slice of a coding-assistant conversation transcript.
 Respond with JSON matching the given schema:
 - entities: distinct people, projects, decisions, or preferences/conventions mentioned, each as {name, type, observations}. Use short stable names (e.g. "user", "decision:auth-approach", "preference:testing", "project:<repo>"). Only include observations that would still be useful in a future, unrelated session - skip step-by-step task narration, file paths, or anything ephemeral to this one task.
+- each observation is {text, subsystem}. subsystem is a short lowercase kebab-case area of the codebase or product that the fact belongs to, e.g. "auto-capture", "search", "backup". One entity's observations may span several subsystems - tag each one on its own merits rather than giving them all the entity's topic. Omit subsystem entirely for cross-cutting facts such as user preferences or project-wide constraints.
 - relations: {from, to, type} triples linking entities, e.g. {from: "project:claude-neo4j", type: "uses", to: "neo4j-driver"}.
 If nothing is worth remembering, respond with empty arrays for both.`;
-  if (!knownNames.length) return base;
-  return (
-    base +
-    `\n\nThese entity names already exist in memory for this project - if a fact in this transcript is about ` +
-    `one of them, reuse the exact existing name below instead of inventing a new one (e.g. don't create ` +
-    `"plugin:foo" if "project:foo" already refers to the same thing):\n${knownNames.map((n) => `- ${n}`).join("\n")}`
-  );
+  if (knownNames.length) {
+    prompt +=
+      `\n\nThese entity names already exist in memory for this project - if a fact in this transcript is about ` +
+      `one of them, reuse the exact existing name below instead of inventing a new one (e.g. don't create ` +
+      `"plugin:foo" if "project:foo" already refers to the same thing):\n${knownNames.map((n) => `- ${n}`).join("\n")}`;
+  }
+  if (knownSubsystems.length) {
+    prompt +=
+      `\n\nThese subsystem tags are already in use for this project. Prefer one of them; only invent a new ` +
+      `tag when none genuinely fits, because near-duplicate tags fragment the index these feed:\n` +
+      knownSubsystems.map((s) => `- ${s}`).join("\n");
+  }
+  return prompt;
 }
 
 const RECORD_MEMORIES_SCHEMA = {
@@ -77,7 +79,17 @@ const RECORD_MEMORIES_SCHEMA = {
         properties: {
           name: { type: "string" },
           type: { type: "string" },
-          observations: { type: "array", items: { type: "string" } },
+          observations: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                text: { type: "string" },
+                subsystem: { type: "string" },
+              },
+              required: ["text"],
+            },
+          },
         },
         required: ["name", "observations"],
       },
@@ -161,67 +173,13 @@ function readNewTranscriptText(transcriptPath, lastLine) {
   return { text: turns.join("\n\n"), totalLines: lines.length };
 }
 
-// Runs the extraction as a locked-down, one-shot headless `claude -p` call:
-// no tools, no MCP servers, no CLAUDE.md/settings inheritance, no session
-// persisted to disk - it only ever gets to return the JSON schema payload.
-function runClaudeExtraction(transcriptText, systemPrompt, timeoutMs = CAPTURE_TIMEOUT_MS) {
-  return new Promise((resolve, reject) => {
-    const args = [
-      "-p",
-      "--system-prompt",
-      systemPrompt,
-      "--output-format",
-      "json",
-      "--json-schema",
-      JSON.stringify(RECORD_MEMORIES_SCHEMA),
-      "--tools",
-      "",
-      "--permission-mode",
-      "dontAsk",
-      "--setting-sources",
-      "",
-      "--strict-mcp-config",
-      "--no-session-persistence",
-      "--model",
-      CAPTURE_MODEL,
-    ];
-
-    const child = spawn(CLAUDE_BIN, args, { stdio: ["pipe", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      reject(new Error(`claude extraction timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-
-    child.stdout.on("data", (chunk) => (stdout += chunk));
-    child.stderr.on("data", (chunk) => (stderr += chunk));
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code !== 0) {
-        reject(new Error(`claude exited ${code}: ${stderr.slice(0, 500)}`));
-        return;
-      }
-      resolve(stdout);
-    });
-
-    child.stdin.write(transcriptText);
-    child.stdin.end();
+async function extractMemories(transcriptText, knownNames, knownSubsystems, timeoutMs) {
+  const structured = await extractStructured({
+    input: transcriptText,
+    systemPrompt: buildExtractionSystemPrompt(knownNames, knownSubsystems),
+    schema: RECORD_MEMORIES_SCHEMA,
+    timeoutMs,
   });
-}
-
-async function extractMemories(transcriptText, knownNames, timeoutMs) {
-  const stdout = await runClaudeExtraction(transcriptText, buildExtractionSystemPrompt(knownNames), timeoutMs);
-  const result = JSON.parse(stdout);
-  if (result.is_error) {
-    throw new Error(`claude extraction error: ${result.result ?? "unknown"}`);
-  }
-  const structured = result.structured_output ?? JSON.parse(result.result ?? "{}");
   return { entities: structured.entities ?? [], relations: structured.relations ?? [] };
 }
 
@@ -241,7 +199,7 @@ function chunkTranscript(text, windowChars, maxChunks) {
 
 // Entities recur across chunks of the same session, so merge rather than
 // issuing a separate write per chunk for the same entity.
-function mergeMemories(results) {
+export function mergeMemories(results) {
   const entities = new Map();
   const relations = new Map();
   for (const result of results) {
@@ -276,6 +234,7 @@ async function runCapture({ sessionId, transcriptPath, cwd, maxChunks = MAX_CHUN
 
   const project = detectProject(cwd);
   const knownNames = await listEntityNames(project);
+  const knownSubsystems = (await listSubsystems(project)).map((s) => s.subsystem);
   const { chunks, covered, dropped } = chunkTranscript(text, CAPTURE_WINDOW_CHARS, maxChunks);
   if (dropped > 0) {
     log(
@@ -287,7 +246,7 @@ async function runCapture({ sessionId, transcriptPath, cwd, maxChunks = MAX_CHUN
 
   const extracted = [];
   for (const chunk of chunks) {
-    extracted.push(await extractMemories(chunk, knownNames, timeoutMs));
+    extracted.push(await extractMemories(chunk, knownNames, knownSubsystems, timeoutMs));
   }
   const memories = mergeMemories(extracted);
 
@@ -303,6 +262,7 @@ async function runCapture({ sessionId, transcriptPath, cwd, maxChunks = MAX_CHUN
       sessionId,
       project,
       existingNames: seenNames,
+      existingSubsystems: knownSubsystems,
     });
     seenNames.push(entity.name);
     added += entity.observations.length;
