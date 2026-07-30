@@ -36,6 +36,15 @@ else
   fi
 fi
 
+# 1b. Rootless Podman needs a systemd user unit to survive a reboot.
+if [ "${ENGINE:-}" = "podman" ] && [ "$(uname -s)" = "Linux" ]; then
+  if systemctl --user is-enabled claude-neo4j.service >/dev/null 2>&1; then
+    pass "boot persistence: systemd user unit enabled"
+  else
+    fail "boot persistence: no systemd user unit — this container will not survive a reboot (run scripts/setup-local.sh to install one)"
+  fi
+fi
+
 # 2. Plugin config file present and loadable
 CONFIG_CHECK="$(node -e "
 import('./src/lib/config.js').then(({ loadConnectionConfig }) => {

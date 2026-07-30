@@ -162,6 +162,48 @@ if [ "$status" != "healthy" ]; then
   exit 1
 fi
 
+# Rootless Podman is daemonless: --restart only holds while the user's Podman
+# session lives, so a reboot leaves the container down and the next Claude
+# session memory-less. A systemd *user* unit plus lingering is Podman's answer.
+offer_boot_persistence() {
+  [ "$ENGINE" = "podman" ] || return 0                 # Docker's daemon already does this
+  [ "$(uname -s)" = "Linux" ] || return 0              # macOS: podman machine handles it
+  command -v systemctl >/dev/null 2>&1 || return 0
+  systemctl --user is-enabled claude-neo4j.service >/dev/null 2>&1 && return 0
+
+  cat <<'EOF'
+
+Rootless Podman has no daemon, so this container will NOT come back after a
+reboot on its own. A systemd user unit fixes that:
+
+    systemctl --user enable --now claude-neo4j.service
+    loginctl enable-linger "$USER"      (so it runs without an active login)
+
+EOF
+  if [ ! -t 0 ]; then
+    echo "Not interactive — skipping. Re-run this script to be asked again." >&2
+    return 0
+  fi
+
+  local reply=""
+  read -r -p "Install it now? [y/N] " reply
+  case "$reply" in
+    [yY]|[yY][eE][sS]) ;;
+    *) echo "Skipped. Re-run scripts/setup-local.sh after a reboot, or re-run this to be asked again."; return 0 ;;
+  esac
+
+  mkdir -p "$HOME/.config/systemd/user"
+  podman generate systemd --name claude-neo4j-memory --restart-policy=always \
+    > "$HOME/.config/systemd/user/claude-neo4j.service"
+  systemctl --user daemon-reload
+  systemctl --user enable --now claude-neo4j.service
+  loginctl enable-linger "$USER" 2>/dev/null || \
+    echo "Note: 'loginctl enable-linger' failed; the unit starts on login rather than boot." >&2
+  echo "Installed. The container will now start at boot."
+}
+
+offer_boot_persistence
+
 echo "Container healthy. Configuring plugin..."
 node scripts/configure.mjs \
   --mode local \
