@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# One-command local setup: checks Docker is available, generates docker/.env
-# if missing, starts/waits for the Neo4j container, then configures the
-# plugin against it. Safe to re-run any time (idempotent).
+# One-command local setup: resolves a container engine (Podman preferred,
+# Docker fallback), generates docker/.env if missing, starts/waits for the
+# Neo4j container, then configures the plugin against it. Safe to re-run any
+# time (idempotent).
 # Usage: ./scripts/setup-local.sh   (or from repo root: scripts/setup-local.sh)
 set -euo pipefail
 

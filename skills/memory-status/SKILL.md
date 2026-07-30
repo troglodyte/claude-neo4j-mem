@@ -23,4 +23,4 @@ If the user genuinely needs a query the tools do not cover, use `scripts/cypher.
 
 ## When things fail
 
-If a tool call fails, explain that the Neo4j memory backend is unreachable and point to the plugin's setup: run `npm run configure` inside the plugin directory, and for local mode make sure `docker compose up -d` (in `docker/`) is running. `scripts/check-health.sh` diagnoses the whole stack and prints PASS/FAIL per check.
+If a tool call fails, explain that the Neo4j memory backend is unreachable and point to the plugin's setup: run `npm run configure` inside the plugin directory, and for local mode make sure the container is running (`scripts/setup-local.sh` starts it, under Podman or Docker). `scripts/check-health.sh` diagnoses the whole stack and prints PASS/FAIL per check.
