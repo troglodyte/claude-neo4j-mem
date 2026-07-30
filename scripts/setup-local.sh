@@ -17,27 +17,30 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)" || REPO_ROOT=""
 }
 cd "$REPO_ROOT"
 
-if ! command -v docker >/dev/null 2>&1; then
+# Replaced in Task 5 by the consent-gated installer.
+offer_engine_install() {
   cat >&2 <<'EOF'
-Docker is not installed (or not on PATH), so the bundled local Neo4j
-container can't be started. Two ways forward:
+No container engine found. Install Podman (recommended) or Docker, then re-run.
 
-  1. Install Docker, then re-run this script:
-       https://docs.docker.com/get-docker/
+  Debian/Ubuntu  sudo apt-get install -y podman
+  macOS          brew install podman && podman machine init && podman machine start
 
-  2. Skip Docker and point the plugin at a remote Neo4j instance instead
-     (e.g. Neo4j Aura's free tier: https://console.neo4j.io):
-       node scripts/configure.mjs --mode remote \
-         --uri neo4j+s://xxxxx.databases.neo4j.io \
-         --username neo4j --password '...' --database neo4j
+Or skip containers entirely and point the plugin at a remote Neo4j
+(e.g. Neo4j Aura's free tier: https://console.neo4j.io):
+  node scripts/configure.mjs --mode remote \
+    --uri neo4j+s://xxxxx.databases.neo4j.io \
+    --username neo4j --password '...' --database neo4j
 EOF
-  exit 1
-fi
+  return 1
+}
 
-if ! docker info >/dev/null 2>&1; then
-  echo "Docker is installed but its daemon isn't reachable. Start Docker Desktop (or the docker service), then re-run this script." >&2
-  exit 1
+# shellcheck source=scripts/lib-engine.sh
+. "$REPO_ROOT/scripts/lib-engine.sh"
+
+if ! resolve_engine; then
+  offer_engine_install || exit 1     # defined in Task 5
 fi
+echo "Using container engine: $ENGINE"
 
 ENV_FILE="docker/.env"
 if [ ! -f "$ENV_FILE" ]; then
@@ -63,19 +66,43 @@ set +a
 : "${NEO4J_BOLT_PORT:=7687}"
 : "${NEO4J_PASSWORD:?NEO4J_PASSWORD is not set in docker/.env}"
 
-if ! docker inspect claude-neo4j-memory >/dev/null 2>&1; then
-  echo "Container claude-neo4j-memory not found, starting it..."
-  (cd docker && docker compose up -d)
+# Volume names are the ones compose already created ("docker_" prefix and all).
+# Renaming them would strand the existing graph in a detached volume and hand
+# the user a silently empty database.
+DATA_VOLUME="docker_claude_neo4j_data"
+LOGS_VOLUME="docker_claude_neo4j_logs"
+
+start_container() {
+  "$ENGINE" run -d \
+    --name claude-neo4j-memory \
+    --restart unless-stopped \
+    -p "${NEO4J_HTTP_PORT:-7474}:7474" \
+    -p "${NEO4J_BOLT_PORT:-7687}:7687" \
+    -e NEO4J_AUTH="${NEO4J_USERNAME}/${NEO4J_PASSWORD}" \
+    -e NEO4J_dbms_memory_pagecache_size=512M \
+    -e NEO4J_server_memory_heap_max__size=512M \
+    -v "$DATA_VOLUME:/data" \
+    -v "$LOGS_VOLUME:/logs" \
+    --health-cmd "wget -O /dev/null -q http://localhost:7474 || exit 1" \
+    --health-interval 5s \
+    --health-timeout 5s \
+    --health-retries 30 \
+    neo4j:5-community >/dev/null
+}
+
+if ! "$ENGINE" inspect claude-neo4j-memory >/dev/null 2>&1; then
+  echo "Container claude-neo4j-memory not found, starting it under $ENGINE..."
+  start_container
 fi
 
 echo "Waiting for claude-neo4j-memory container to be healthy..."
 for _ in $(seq 1 30); do
-  status="$(docker inspect -f '{{.State.Health.Status}}' claude-neo4j-memory 2>/dev/null || echo "missing")"
+  status="$(container_health claude-neo4j-memory)"
   if [ "$status" = "healthy" ]; then
     break
   fi
-  if [ "$status" = "missing" ]; then
-    echo "Container claude-neo4j-memory not found. Run: (cd docker && docker compose up -d)" >&2
+  if [ "$status" = "unknown" ]; then
+    echo "Container claude-neo4j-memory not found. Run: scripts/setup-local.sh" >&2
     exit 1
   fi
   sleep 2
