@@ -1,7 +1,14 @@
 # Replace Docker with a natively-installed Neo4j
 
-**Status**: approved design, not yet implemented
+**Status**: SUPERSEDED by `2026-07-30-podman-engine-design.md`. Not implemented.
 **Date**: 2026-07-30
+
+> Abandoned in favour of running the same container under Podman, which needs
+> no tarball pin, no JDK prerequisite, and no `set-initial-password` window.
+> Kept for the two findings that outlived it: the `system`-database auth trap
+> (§ "Trap"), and the measured per-prompt cost of a static `neo4j-driver`
+> import (§ "Deferred injection"). The rehearse-on-7688 verification approach
+> carried over to the Podman design intact.
 
 Move the local backend from a Docker container to a pinned Neo4j tarball the
 plugin installs and runs itself, and migrate the existing graph without risking
