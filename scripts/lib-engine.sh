@@ -49,13 +49,17 @@ engine_hint() {
 }
 
 # Podman and Docker have disagreed about where healthcheck state lives
-# (.State.Health vs .State.Healthcheck) across versions, and `inspect` returns
-# an EMPTY STRING rather than an error for a template that matches nothing --
-# so a wrong guess here reads as "not healthy yet" and silently burns the whole
-# retry loop. Try both and say "unknown" only if neither answers.
+# (.State.Health vs .State.Healthcheck) across versions. A template that
+# doesn't match either engine's actual state shape is an ERROR (non-zero exit)
+# -- verified empirically, not the empty string this comment used to claim --
+# so both `inspect` calls below are guarded with `|| true`: without it, a
+# non-matching template on the FIRST guess would trip `set -e` in any caller
+# and abort the whole script right there, with the `.State.Healthcheck`
+# fallback never reached and no explanation printed. Try both and say
+# "unknown" only if neither answers.
 container_health() {
   local container="$1" status
-  status="$("$ENGINE" inspect -f '{{.State.Health.Status}}' "$container" 2>/dev/null)"
-  [ -n "$status" ] || status="$("$ENGINE" inspect -f '{{.State.Healthcheck.Status}}' "$container" 2>/dev/null)"
+  status="$("$ENGINE" inspect -f '{{.State.Health.Status}}' "$container" 2>/dev/null || true)"
+  [ -n "$status" ] || status="$("$ENGINE" inspect -f '{{.State.Healthcheck.Status}}' "$container" 2>/dev/null || true)"
   printf '%s' "${status:-unknown}"
 }
