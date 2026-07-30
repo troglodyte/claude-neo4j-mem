@@ -152,13 +152,14 @@ if [ "$BEFORE" != "$RECHECK" ]; then
   die "the Docker graph changed since the baseline fingerprint — something wrote to it during the rehearsal (close other Claude Code sessions and re-run). Docker is untouched and still serving 7687."
 fi
 
-docker stop "$CONTAINER" >/dev/null || die "could not stop the Docker container; nothing changed"
-
-# From here until the Podman container is confirmed healthy, Docker is stopped
-# and Podman is unproven. A Ctrl-C or unexpected exit in that window must not
-# leave both engines down with nothing telling the user how to recover, so a
-# trap now restarts Docker unless Podman has already been proven healthy. It
-# is cleared only once the health check below passes.
+# From here until the Podman container is confirmed healthy, `docker stop`
+# below can leave Docker down and Podman unproven. `docker stop` itself blocks
+# for seconds while Neo4j shuts down, and a Ctrl-C during that wait is exactly
+# as dangerous as one after it - so the trap is armed BEFORE the stop, not
+# after, and covers the stop itself, not just the window that follows it.
+# `docker start` on an already-running container is a harmless no-op, so
+# arming this early costs nothing. It is cleared only once the health check
+# below passes.
 CUTOVER_HEALTHY=0
 cutover_recover() {
   [ "$CUTOVER_HEALTHY" = "1" ] && return
@@ -170,6 +171,8 @@ cutover_recover() {
   fi
 }
 trap cutover_recover EXIT INT TERM
+
+docker stop "$CONTAINER" >/dev/null || die "could not stop the Docker container; nothing changed"
 
 podman run -d --name "$CONTAINER" --restart unless-stopped \
   -p "${NEO4J_HTTP_PORT:-7474}:7474" -p "${NEO4J_BOLT_PORT:-7687}:7687" \

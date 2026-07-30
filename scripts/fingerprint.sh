@@ -2,6 +2,10 @@
 # Prints a content fingerprint of the graph inside a running container, so the
 # same graph can be compared across engines. Counts alone can match while the
 # content differs, so every count is paired with a hash of the sorted content.
+# The counts= line is five comma-separated numbers, in order: Entity nodes,
+# Observation nodes, RELATES_TO edges, Session nodes, PRODUCED edges. Session/
+# PRODUCED get counts only (no content hash) - they carry no free-text payload
+# of their own, so a count is sufficient evidence a migration didn't drop them.
 # Usage: scripts/fingerprint.sh <engine> <container>
 set -euo pipefail
 
@@ -28,10 +32,17 @@ q() {
 
 h() { sha256sum | cut -d' ' -f1; }
 
+# Aliased to a single word (`AS counts`) rather than left as the bare
+# expression: with no alias, cypher-shell's plain-format header is the
+# expression text verbatim, and once that expression itself spans more than
+# one physical line (as it does now, five fields in), the header does too -
+# `tail -n +2` only drops the header's first line, and its leftover second
+# line survives into what `tr` then flattens onto the real data row.
 counts="$(q '
 MATCH (e:Entity) WITH count(e) AS entities
 MATCH (o:Observation) WITH entities, count(o) AS observations
-RETURN entities + "," + observations + "," + COUNT { ()-[:RELATES_TO]->() }
+RETURN entities + "," + observations + "," + COUNT { ()-[:RELATES_TO]->() } + "," +
+       COUNT { (:Session) } + "," + COUNT { ()-[:PRODUCED]->() } AS counts
 ' | tail -n +2 | tr -d '"[:space:]')"
 
 # Free-text fields (o.text, and defensively every other concatenated string

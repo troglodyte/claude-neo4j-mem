@@ -194,17 +194,23 @@ normal. Several ran that way before it was noticed.
   fallback, `CLAUDE_NEO4J_ENGINE` pins either. Podman **cannot see Docker's
   named volumes** — separate storage backends — so switching engines moves data
   by dump/load, not by pointing at the same volume.
-- **The container volumes are still named `docker_claude_neo4j_data`/`_logs`.**
-  Compose created them with its directory as a prefix; `setup-local.sh` now uses
-  a plain `run` but keeps the literal names. Renaming them strands the existing
-  graph in a detached volume and yields a silently empty database.
+- **The two engines use different volume names, deliberately.** Docker's stay
+  `docker_claude_neo4j_data`/`_logs` — compose created them with its directory
+  as a prefix, and `setup-local.sh` must never rename them: doing so strands
+  the existing graph in a detached volume and yields a silently empty
+  database. Podman's are the plain `claude_neo4j_data`/`_logs` — it never went
+  through compose, and `migrate-to-podman.sh` creates them fresh under that
+  unprefixed name — so `setup-local.sh` selects the pair by `$ENGINE` rather
+  than sharing one hardcoded name across both.
 - **First Podman run on a machine that never migrated looks successful but
-  starts empty.** Same literal volume names, different storage backend: Podman
-  can't see a volume Docker created under that name, so it just auto-creates a
-  fresh, empty one with the same name and the container comes up healthy.
-  Nothing errors — the graph is just gone. Running `setup-local.sh` under
-  Podman is not a substitute for `npm run migrate-to-podman`; only the latter
-  actually moves the data across the boundary.
+  starts empty — and so does a Podman run after the migrated container was
+  removed.** Either way Podman finds no `claude_neo4j_data` volume and just
+  auto-creates a fresh, empty one with that name; the container comes up
+  healthy and nothing errors — the graph is just gone. `setup-local.sh` guards
+  the second case (container missing under `$ENGINE` but present under the
+  other engine) and refuses rather than create, but running it under Podman is
+  still not a substitute for `npm run migrate-to-podman` on a first migration;
+  only the latter actually moves the data across the boundary.
 - **Container healthcheck state lives at a different path per engine.**
   `.State.Health.Status` vs `.State.Healthcheck.Status`, and a template
   matching neither is an **error with a non-zero exit** — not the empty

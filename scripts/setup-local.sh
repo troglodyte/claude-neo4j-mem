@@ -116,11 +116,21 @@ set +a
 : "${NEO4J_BOLT_PORT:=7687}"
 : "${NEO4J_PASSWORD:?NEO4J_PASSWORD is not set in docker/.env}"
 
-# Volume names are the ones compose already created ("docker_" prefix and all).
-# Renaming them would strand the existing graph in a detached volume and hand
-# the user a silently empty database.
-DATA_VOLUME="docker_claude_neo4j_data"
-LOGS_VOLUME="docker_claude_neo4j_logs"
+# Volume names differ by engine, deliberately. Docker's were created by
+# compose with its directory name as a prefix ("docker_..."); renaming them
+# would strand the existing graph in a detached volume and hand the user a
+# silently empty database, so that spelling is permanent for Docker. Podman
+# never saw compose — migrate-to-podman.sh creates its volumes fresh, under
+# the plain unprefixed name — so matching that here is what lets this script
+# find a migrated graph instead of Podman auto-creating an empty volume with
+# the Docker-shaped name (see the guard below).
+if [ "$ENGINE" = "podman" ]; then
+  DATA_VOLUME="claude_neo4j_data"
+  LOGS_VOLUME="claude_neo4j_logs"
+else
+  DATA_VOLUME="docker_claude_neo4j_data"
+  LOGS_VOLUME="docker_claude_neo4j_logs"
+fi
 
 start_container() {
   "$ENGINE" run -d \
@@ -141,6 +151,21 @@ start_container() {
 }
 
 if ! "$ENGINE" inspect claude-neo4j-memory >/dev/null 2>&1; then
+  # The container can genuinely live under the other engine (most commonly:
+  # migrated to Podman, then the Podman container was later removed — `podman
+  # rm`, `podman system reset`, or the rollback line migrate-to-podman.sh
+  # prints). Creating a fresh one here would land on this engine's volume
+  # name, which Podman/Docker each auto-create empty, silently orphaning the
+  # real graph. The whole check is one `if` condition (never a bare `&&`
+  # chain run standalone) so a missing other-engine binary — the common case —
+  # can't trip `set -e`; it just fails the condition and falls through.
+  OTHER="podman"; [ "$ENGINE" = "podman" ] && OTHER="docker"
+  if command -v "$OTHER" >/dev/null 2>&1 && "$OTHER" inspect claude-neo4j-memory >/dev/null 2>&1; then
+    echo "Container claude-neo4j-memory exists under $OTHER, not $ENGINE." >&2
+    echo "Running this script does not move data between engines." >&2
+    echo "Use: npm run migrate-to-podman" >&2
+    exit 1
+  fi
   echo "Container claude-neo4j-memory not found, starting it under $ENGINE..."
   start_container
 fi
@@ -187,7 +212,7 @@ EOF
   fi
 
   local reply=""
-  read -r -p "Install it now? [y/N] " reply
+  read -r -p "Install it now? [y/N] " reply || reply=""
   case "$reply" in
     [yY]|[yY][eE][sS]) ;;
     *) echo "Skipped. Re-run scripts/setup-local.sh after a reboot, or re-run this to be asked again."; return 0 ;;
