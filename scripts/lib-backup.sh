@@ -6,6 +6,8 @@
 # a way to stop the container that is guaranteed to start it again afterwards.
 
 CONTAINER="claude-neo4j-memory"
+# shellcheck source=scripts/lib-engine.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/lib-engine.sh"
 BACKUP_DIR="${CLAUDE_NEO4J_BACKUP_DIR:-$HOME/.claude-neo4j/backups}"
 CONFIG_FILE="$HOME/.claude-neo4j/config.json"
 
@@ -63,20 +65,19 @@ EOF
   exit 1
 }
 
-require_docker() {
-  command -v docker >/dev/null 2>&1 || die "docker is not installed (or not on PATH)"
-  docker info >/dev/null 2>&1 || die "docker is installed but its daemon isn't reachable"
-  docker inspect "$CONTAINER" >/dev/null 2>&1 || die "container $CONTAINER not found (run: scripts/setup-local.sh)"
+require_engine() {
+  resolve_engine || die "no container engine available. Install Podman (recommended) or Docker, then re-run. See: scripts/setup-local.sh"
+  "$ENGINE" inspect "$CONTAINER" >/dev/null 2>&1 || die "container $CONTAINER not found under $ENGINE (run: scripts/setup-local.sh)"
 }
 
 container_running() {
-  [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ]
+  [ "$("$ENGINE" inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = "true" ]
 }
 
 # Match the image the container actually runs, so a pinned or upgraded Neo4j
 # version dumps with its own neo4j-admin rather than whatever :5-community is.
 container_image() {
-  docker inspect -f '{{.Config.Image}}' "$CONTAINER" 2>/dev/null
+  "$ENGINE" inspect -f '{{.Config.Image}}' "$CONTAINER" 2>/dev/null
 }
 
 # The container must come back on *every* exit path — a failed dump or a Ctrl-C
@@ -86,8 +87,8 @@ restart_container() {
   [ "$WAS_RUNNING" = "1" ] || return 0
   container_running && return 0
   echo "Restarting $CONTAINER..."
-  docker start "$CONTAINER" >/dev/null || {
-    echo "$PROG: FAILED to restart $CONTAINER — start it with: docker start $CONTAINER" >&2
+  "$ENGINE" start "$CONTAINER" >/dev/null || {
+    echo "$PROG: FAILED to restart $CONTAINER — start it with: $ENGINE start $CONTAINER" >&2
     return 1
   }
 }
@@ -97,7 +98,7 @@ stop_container_with_restart_trap() {
     WAS_RUNNING=1
     trap restart_container EXIT INT TERM
     echo "Stopping $CONTAINER (neo4j-admin cannot touch a mounted database)..."
-    docker stop "$CONTAINER" >/dev/null || die "failed to stop $CONTAINER"
+    "$ENGINE" stop "$CONTAINER" >/dev/null || die "failed to stop $CONTAINER"
   else
     echo "$CONTAINER is already stopped; leaving it that way."
   fi
@@ -106,7 +107,7 @@ stop_container_with_restart_trap() {
 wait_for_health() {
   local status="" i
   for i in $(seq 1 30); do
-    status="$(docker inspect -f '{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || echo missing)"
+    status="$(container_health "$CONTAINER")"
     [ "$status" = "healthy" ] && return 0
     sleep 2
   done

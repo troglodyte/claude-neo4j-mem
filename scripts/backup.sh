@@ -77,7 +77,7 @@ fi
 
 load_config
 require_local_mode
-require_docker
+require_engine
 
 if [ "$COMPRESS" = "1" ] && ! command -v xz >/dev/null 2>&1; then
   die "--xz given but xz is not installed (or: drop --xz; it only saves ~1% anyway)"
@@ -103,10 +103,10 @@ echo "Dumping database '$DATABASE'..."
 # separately rather than discarded — they are the only clue when a dump fails.
 ERRLOG="$(mktemp)"
 if [ "$COMPRESS" = "1" ]; then
-  docker run --rm --volumes-from "$CONTAINER" "$IMAGE" \
+  "$ENGINE" run --rm --volumes-from "$CONTAINER" "$IMAGE" \
     neo4j-admin database dump "$DATABASE" --to-stdout 2>"$ERRLOG" | xz -T0 -c > "$OUT"
 else
-  docker run --rm --volumes-from "$CONTAINER" "$IMAGE" \
+  "$ENGINE" run --rm --volumes-from "$CONTAINER" "$IMAGE" \
     neo4j-admin database dump "$DATABASE" --to-stdout 2>"$ERRLOG" > "$OUT"
 fi
 status="${PIPESTATUS[0]}"
