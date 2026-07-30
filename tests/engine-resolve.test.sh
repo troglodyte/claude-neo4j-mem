@@ -81,5 +81,46 @@ rm -f "$SHIM/podman"
 [[ "$(try_resolve podman)" == ERR:* ]] && pass "rejects an override that is not on PATH" \
   || fail "accepted missing podman, got: $(try_resolve podman)"
 
+# 8. setup-local.sh must never invoke sudo without an affirmative answer.
+#    Shim sudo so any escalation is recorded rather than performed.
+SETUP="$REPO_ROOT/scripts/setup-local.sh"
+cat >"$SHIM/sudo" <<EOF
+#!/usr/bin/env bash
+echo "SUDO-CALLED \$*" >>"$SHIM/sudo.log"
+exit 0
+EOF
+chmod +x "$SHIM/sudo"
+cat >"$SHIM/apt-get" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$SHIM/apt-get"
+
+# CRITICAL: shadow both engines with shims whose `info` FAILS, rather than
+# deleting them. setup-local.sh needs coreutils, so /usr/bin must stay on PATH
+# -- and /usr/bin/docker is the REAL docker driving the user's live graph. With
+# the shims absent, resolve_engine would find it, succeed, and this test would
+# start containers and rewrite ~/.claude-neo4j/config.json for real. $SHIM comes
+# first on PATH, so these shadow the real binaries and force the no-engine path.
+make_shim podman 1
+make_shim docker 1
+rm -f "$SHIM/sudo.log"
+
+# Declining the prompt must not escalate.
+printf 'n\n' | env PATH="$SHIM:/usr/bin:/bin" bash "$SETUP" >/dev/null 2>&1
+if [ -f "$SHIM/sudo.log" ]; then
+  fail "setup-local.sh ran sudo despite a declined prompt: $(cat "$SHIM/sudo.log")"
+else
+  pass "declining the install prompt does not escalate"
+fi
+
+# Non-interactive (no tty, empty stdin) must not escalate either.
+env PATH="$SHIM:/usr/bin:/bin" bash "$SETUP" </dev/null >/dev/null 2>&1
+if [ -f "$SHIM/sudo.log" ]; then
+  fail "setup-local.sh ran sudo non-interactively: $(cat "$SHIM/sudo.log")"
+else
+  pass "non-interactive invocation does not escalate"
+fi
+
 ((failures == 0)) || { printf '\n%d check(s) failed\n' "$failures"; exit 1; }
 printf '\nall checks passed\n'

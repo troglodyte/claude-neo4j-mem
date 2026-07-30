@@ -17,28 +17,77 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)" || REPO_ROOT=""
 }
 cd "$REPO_ROOT"
 
-# Replaced in Task 5 by the consent-gated installer.
+# Podman has no supported user-local tarball, so Linux installs need sudo.
+# It is never escalated silently: print the exact command, then ask.
 offer_engine_install() {
-  cat >&2 <<'EOF'
-No container engine found. Install Podman (recommended) or Docker, then re-run.
+  local cmd=""
+  case "$(uname -s)" in
+    Darwin)
+      command -v brew >/dev/null 2>&1 && cmd="brew install podman" ;;
+    Linux)
+      if command -v apt-get >/dev/null 2>&1; then
+        cmd="sudo apt-get install -y podman"
+      elif command -v dnf >/dev/null 2>&1; then
+        cmd="sudo dnf install -y podman"
+      elif command -v pacman >/dev/null 2>&1; then
+        cmd="sudo pacman -S --noconfirm podman"
+      fi ;;
+  esac
 
-  Debian/Ubuntu  sudo apt-get install -y podman
-  macOS          brew install podman && podman machine init && podman machine start
+  if [ -z "$cmd" ]; then
+    cat >&2 <<'EOF'
+No container engine found, and no supported package manager was detected.
 
-Or skip containers entirely and point the plugin at a remote Neo4j
-(e.g. Neo4j Aura's free tier: https://console.neo4j.io):
+Install Podman (recommended) or Docker by hand, then re-run this script.
+  https://podman.io/docs/installation
+
+Or point the plugin at a remote Neo4j instead (e.g. Neo4j Aura's free tier):
   node scripts/configure.mjs --mode remote \
     --uri neo4j+s://xxxxx.databases.neo4j.io \
     --username neo4j --password '...' --database neo4j
 EOF
-  return 1
+    return 1
+  fi
+
+  echo "No container engine found. Podman can be installed with:"
+  echo
+  echo "    $cmd"
+  echo
+
+  # No tty means no consent. Print and stop rather than assume.
+  if [ ! -t 0 ]; then
+    echo "Not running interactively — run the command above, then re-run this script." >&2
+    return 1
+  fi
+
+  local reply=""
+  read -r -p "Run it now? [y/N] " reply
+  case "$reply" in
+    [yY]|[yY][eE][sS]) ;;
+    *) echo "Skipped. Run the command above, then re-run this script." >&2; return 1 ;;
+  esac
+
+  # shellcheck disable=SC2086
+  $cmd || { echo "Install failed. Run '$cmd' by hand and re-check the output." >&2; return 1; }
+
+  if [ "$(uname -s)" = "Darwin" ]; then
+    echo "Provisioning the Podman VM (this can take a few minutes)..."
+    podman machine init 2>/dev/null || true   # already-initialised is not an error
+    podman machine start 2>/dev/null || true
+  fi
+
+  resolve_engine || {
+    echo "Podman installed but still not usable.$(engine_hint podman)" >&2
+    return 1
+  }
+  return 0
 }
 
 # shellcheck source=scripts/lib-engine.sh
 . "$REPO_ROOT/scripts/lib-engine.sh"
 
 if ! resolve_engine; then
-  offer_engine_install || exit 1     # defined in Task 5
+  offer_engine_install || exit 1
 fi
 echo "Using container engine: $ENGINE"
 
