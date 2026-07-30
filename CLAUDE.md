@@ -206,14 +206,19 @@ normal. Several ran that way before it was noticed.
   Podman is not a substitute for `npm run migrate-to-podman`; only the latter
   actually moves the data across the boundary.
 - **Container healthcheck state lives at a different path per engine.**
-  `.State.Health.Status` vs `.State.Healthcheck.Status`, and `inspect` returns
-  an *empty string* rather than an error for a template matching nothing — so a
-  wrong guess reads as "not healthy yet" and silently burns the retry loop.
-  `container_health` in `lib-engine.sh` tries both.
+  `.State.Health.Status` vs `.State.Healthcheck.Status`, and a template
+  matching neither is an **error with a non-zero exit** — not the empty
+  string it might look like it'd return. An unguarded `inspect` of this shape
+  aborts the caller under `set -e` with no explanation the moment the first
+  guess misses; this already happened once. `container_health` in
+  `lib-engine.sh` tries both paths and guards **each** call with `|| true` —
+  any similar `inspect` call needs the same guard.
 - **Rootless Podman does not survive a reboot.** No daemon means `--restart`
   only holds while the user's Podman session lives. `setup-local.sh` offers a
-  systemd user unit plus `loginctl enable-linger`; `check-health.sh` reports
-  when it was declined. This is the one behavioural regression against Docker.
+  systemd user unit plus `loginctl enable-linger`; `check-health.sh` can only
+  report the unit is absent — it has no way to tell "declined" apart from
+  "never offered" or "install failed". This is the one behavioural regression
+  against Docker.
 
 ## Marketplace snapshots drift from the working tree
 

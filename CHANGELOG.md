@@ -19,8 +19,10 @@ release that doesn't move it never reaches any other project.
   is deleted; `docker/.env` keeps its path and role.
 - **Added** `npm run migrate-to-podman`, a one-shot Docker→Podman graph
   migration: rehearses the restore on port 7688, verifies it against a
-  content fingerprint, and fails closed on any mismatch. Nothing is
-  destroyed; the command to reclaim the rehearsal container is printed.
+  content fingerprint, and fails closed on any mismatch. The rehearsal
+  container is removed automatically; the old Docker container and its
+  volumes are kept untouched as a rollback safety net, and the command to
+  reclaim them once you're satisfied is printed at the end.
 - **Added** an optional systemd user unit, offered by `setup-local.sh`, for
   rootless Podman boot persistence — rootless Podman has no daemon, so
   without it the container does not come back after a reboot.
