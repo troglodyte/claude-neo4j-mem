@@ -207,7 +207,10 @@ EOF
   # fallible command here is therefore its own `if ! ...; then return 0; fi`
   # rather than a bare statement, and a partial/empty unit file is removed
   # rather than handed to daemon-reload/enable.
-  mkdir -p "$HOME/.config/systemd/user"
+  if ! mkdir -p "$HOME/.config/systemd/user"; then
+    echo "Boot-persistence setup failed: could not create ~/.config/systemd/user. This is safe to skip -- re-run scripts/setup-local.sh to retry." >&2
+    return 0
+  fi
   local unit_file="$HOME/.config/systemd/user/claude-neo4j.service"
 
   if ! podman generate systemd --name claude-neo4j-memory --restart-policy=always \
