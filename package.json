@@ -14,6 +14,7 @@
     "restore": "bash scripts/restore.sh",
     "token-cost": "node scripts/token-cost.mjs",
     "migrate-claude-mem": "node scripts/migrate-from-claude-mem.mjs",
+    "migrate-to-podman": "bash scripts/migrate-to-podman.sh",
     "backfill-subsystems": "node scripts/backfill-subsystems.mjs"
   },
   "dependencies": {
