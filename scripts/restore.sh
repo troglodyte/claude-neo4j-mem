@@ -54,7 +54,7 @@ fi
 
 load_config
 require_local_mode
-require_docker
+require_engine
 
 IMAGE="$(container_image)"
 [ -n "$IMAGE" ] || die "could not determine the image for $CONTAINER"
@@ -101,7 +101,7 @@ fi
 # $(...) describes the substitution itself, not the pipeline within it, so the
 # docker exit status would be invisible.
 INFO_OUT="$(mktemp)"
-"${DECOMPRESS[@]}" 2>/dev/null | docker run --rm -i --volumes-from "$CONTAINER" "$IMAGE" \
+"${DECOMPRESS[@]}" 2>/dev/null | "$ENGINE" run --rm -i --volumes-from "$CONTAINER" "$IMAGE" \
   neo4j-admin database load "$DATABASE" --info --from-stdin >"$INFO_OUT" 2>&1
 info_status="${PIPESTATUS[1]}"
 if [ "$info_status" -ne 0 ]; then
@@ -145,7 +145,7 @@ fi
 stop_container_with_restart_trap
 
 echo "Loading database '$DATABASE'..."
-"${DECOMPRESS[@]}" | docker run --rm -i --volumes-from "$CONTAINER" "$IMAGE" \
+"${DECOMPRESS[@]}" | "$ENGINE" run --rm -i --volumes-from "$CONTAINER" "$IMAGE" \
   neo4j-admin database load "$DATABASE" --from-stdin --overwrite-destination
 status="${PIPESTATUS[1]}"
 [ "$status" -eq 0 ] || die "neo4j-admin load failed (exit $status); the database may be in a partial state — restore again from a known-good archive"

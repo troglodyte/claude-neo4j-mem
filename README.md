@@ -8,7 +8,8 @@ project (by git remote), and are recallable across sessions and machines.
 
 Works against either:
 
-- **Local**: a Neo4j container run via Docker Compose (default).
+- **Local**: a Neo4j container run via Podman or Docker (default; Podman
+  preferred when present, Docker fully supported as a fallback).
 - **Remote / web-based**: any hosted Neo4j reachable over `bolt`/`neo4j+s` — e.g.
   [Neo4j Aura](https://neo4j.com/product/auradb/), or a self-hosted server on the
   network. Only the connection URI and credentials change.
@@ -82,10 +83,14 @@ the same entity name don't collide. `project` comes from
 
 ## Setup
 
-**Quick start (local Docker):** `npm install && scripts/setup-local.sh` does
-everything below — generates `docker/.env` with a random password if missing,
-starts the container, waits for health, and configures the plugin against it.
-Safe to re-run any time. Without Docker, use the remote/Aura path in step 2.
+**Quick start (local):** `npm install && scripts/setup-local.sh` does
+everything below — resolves a container engine (Podman preferred, Docker as a
+fallback; offers to install Podman after an explicit prompt if neither is
+present), generates `docker/.env` with a random password if missing, starts
+the container, waits for health, and configures the plugin against it. Safe
+to re-run any time. `CLAUDE_NEO4J_ENGINE=docker` (or `podman`) pins one
+explicitly instead of relying on the preference order. Without a container
+engine, use the remote/Aura path in step 2.
 
 ### 1. Install dependencies
 
@@ -95,14 +100,22 @@ npm install
 
 ### 2. Start Neo4j
 
-**Local (Docker):**
+**Local (Podman or Docker):**
 
 ```bash
 cd docker
 cp .env.example .env
 # edit .env and set a real NEO4J_PASSWORD
-docker compose up -d
+cd ..
+scripts/setup-local.sh
 ```
+
+`scripts/setup-local.sh` resolves the engine — Podman preferred, Docker as a
+fallback — and creates the container with a plain `$ENGINE run` (there's no
+compose file to run). If neither engine is present it offers to install
+Podman, but only after an explicit prompt; a non-interactive run refuses
+rather than assume consent. `CLAUDE_NEO4J_ENGINE=docker` (or `podman`) pins
+one explicitly.
 
 **Remote (e.g. Aura):** create an instance at
 [console.neo4j.io](https://console.neo4j.io) and note its `neo4j+s://...` URI,
@@ -127,18 +140,18 @@ node scripts/configure.mjs --mode remote \
 
 Resolution order at runtime: env vars (`NEO4J_URI`, `NEO4J_USERNAME`,
 `NEO4J_PASSWORD`, `NEO4J_DATABASE`) > `~/.claude-neo4j/config.json` > local
-Docker defaults. Env vars are handy for pointing one session at a different
+container defaults. Env vars are handy for pointing one session at a different
 database without touching the saved config.
 
 > **`docker/.env` and `~/.claude-neo4j/config.json` are two separate files,
 > synced once at setup time and never linked at runtime.** `docker/.env` only
-> feeds Docker — `docker compose` auto-loads the `.env` beside the
-> `docker-compose.yml` it runs (hence `cd docker` first) and interpolates
-> `NEO4J_USERNAME`/`NEO4J_PASSWORD`/`NEO4J_HTTP_PORT`/`NEO4J_BOLT_PORT` into the
-> container. `~/.claude-neo4j/config.json` is what Claude actually reads (via
-> `src/lib/config.js`), populated by copying those same values out once. **Change
-> the password in `docker/.env` later and Claude won't pick it up** — re-run
-> `npm run configure` or `scripts/setup-local.sh`.
+> feeds container creation — `scripts/setup-local.sh` sources it directly and
+> passes `NEO4J_USERNAME`/`NEO4J_PASSWORD`/`NEO4J_HTTP_PORT`/`NEO4J_BOLT_PORT`
+> to `$ENGINE run` (Podman or Docker). `~/.claude-neo4j/config.json` is what
+> Claude actually reads (via `src/lib/config.js`), populated by copying those
+> same values out once. **Change the password in `docker/.env` later and
+> Claude won't pick it up** — re-run `npm run configure` or
+> `scripts/setup-local.sh`.
 
 ### 4. Load the plugin
 
@@ -231,9 +244,9 @@ memory_timeline             20628     5157  ok       default limit
 
 ## Backup and restore
 
-The memory graph lives in a Docker volume, so it is the only copy of everything
-the plugin has learned. `npm run backup` snapshots it; `npm run restore` puts it
-back.
+The memory graph lives in a container volume (Podman or Docker), so it is the
+only copy of everything the plugin has learned. `npm run backup` snapshots it;
+`npm run restore` puts it back.
 
 ```
 npm run backup                  # -> ~/.claude-neo4j/backups/neo4j-<timestamp>.dump
@@ -284,9 +297,13 @@ src/hooks/                     session-start.js, capture.js
 src/lib/                       config, Neo4j client, schema, graph ops, project detection,
                                  read budgets, SessionStart injection, subsystem tags,
                                  entity-name dedup, extraction, capture digest
-docker/                        docker-compose.yml for local Neo4j
+docker/                        .env / .env.example — local Neo4j credentials
+                                 (no compose file; setup-local.sh runs the
+                                 container directly)
 scripts/                       setup, configure, health check, CLI, statusline,
-                                 backup/restore, cypher, usage, backfill, migration
+                                 backup/restore, cypher, usage, backfill,
+                                 claude-mem migration, engine resolution,
+                                 Docker->Podman migration
 tests/                         node --test suites + the launcher-path guard
 docs/                          cypher cheatsheet, design specs
 CLAUDE.md                      traps and conventions for working on this repo

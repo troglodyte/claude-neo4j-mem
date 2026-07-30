@@ -8,9 +8,13 @@ can't tell you — the traps.
 
 ## Environment
 
-- **Local Neo4j runs on this machine** via `docker/docker-compose.yml`
-  (container `claude-neo4j-memory`, bolt `7687`, http `7474`). Credentials
-  live in `docker/.env` (gitignored).
+- **Local Neo4j runs on this machine** in a container named
+  `claude-neo4j-memory` (bolt `7687`, http `7474`), created by
+  `scripts/setup-local.sh` via a plain `$ENGINE run` — no compose file.
+  `scripts/lib-engine.sh` resolves `$ENGINE`, preferring Podman and falling
+  back to Docker; `CLAUDE_NEO4J_ENGINE` pins either. Credentials live in
+  `docker/.env` (gitignored) — the directory name predates Podman support and
+  stays as-is.
 - **Plugin config**: `~/.claude-neo4j/config.json`, pointed at that container
   (mode: local).
 - `origin` is `git@github.com:troglodyte/claude-neo4j-mem.git`; `main` tracks
@@ -185,6 +189,42 @@ normal. Several ran that way before it was noticed.
 - **Deliberately not built**: a custom web viewer (Neo4j Browser at
   `http://localhost:7474` already is one) and a background transcript-watcher
   daemon (the `PreCompact`/`SessionEnd` hooks already cover it).
+- **Podman and Docker are both supported; `scripts/lib-engine.sh` picks one.**
+  Podman is preferred (daemonless, rootless, no licensing), Docker is the
+  fallback, `CLAUDE_NEO4J_ENGINE` pins either. Podman **cannot see Docker's
+  named volumes** — separate storage backends — so switching engines moves data
+  by dump/load, not by pointing at the same volume.
+- **The two engines use different volume names, deliberately.** Docker's stay
+  `docker_claude_neo4j_data`/`_logs` — compose created them with its directory
+  as a prefix, and `setup-local.sh` must never rename them: doing so strands
+  the existing graph in a detached volume and yields a silently empty
+  database. Podman's are the plain `claude_neo4j_data`/`_logs` — it never went
+  through compose, and `migrate-to-podman.sh` creates them fresh under that
+  unprefixed name — so `setup-local.sh` selects the pair by `$ENGINE` rather
+  than sharing one hardcoded name across both.
+- **First Podman run on a machine that never migrated looks successful but
+  starts empty — and so does a Podman run after the migrated container was
+  removed.** Either way Podman finds no `claude_neo4j_data` volume and just
+  auto-creates a fresh, empty one with that name; the container comes up
+  healthy and nothing errors — the graph is just gone. `setup-local.sh` guards
+  the second case (container missing under `$ENGINE` but present under the
+  other engine) and refuses rather than create, but running it under Podman is
+  still not a substitute for `npm run migrate-to-podman` on a first migration;
+  only the latter actually moves the data across the boundary.
+- **Container healthcheck state lives at a different path per engine.**
+  `.State.Health.Status` vs `.State.Healthcheck.Status`, and a template
+  matching neither is an **error with a non-zero exit** — not the empty
+  string it might look like it'd return. An unguarded `inspect` of this shape
+  aborts the caller under `set -e` with no explanation the moment the first
+  guess misses; this already happened once. `container_health` in
+  `lib-engine.sh` tries both paths and guards **each** call with `|| true` —
+  any similar `inspect` call needs the same guard.
+- **Rootless Podman does not survive a reboot.** No daemon means `--restart`
+  only holds while the user's Podman session lives. `setup-local.sh` offers a
+  systemd user unit plus `loginctl enable-linger`; `check-health.sh` can only
+  report the unit is absent — it has no way to tell "declined" apart from
+  "never offered" or "install failed". This is the one behavioural regression
+  against Docker.
 
 ## Marketplace snapshots drift from the working tree
 

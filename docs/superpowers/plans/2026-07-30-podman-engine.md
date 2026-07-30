@@ -225,8 +225,9 @@ git commit -m "Add container-engine resolution preferring Podman
 
 Podman is daemonless and rootless; Docker stays supported so no existing
 install has to migrate. container_health reads both .State.Health and
-.State.Healthcheck because inspect returns an empty string, not an error,
-for a template that matches nothing."
+.State.Healthcheck because a template that matches neither is an error with
+a non-zero exit, not an empty string, so each inspect call is guarded with
+|| true."
 ```
 
 ---
@@ -1196,10 +1197,11 @@ Add to **Design decisions and traps**:
   a plain `run` but keeps the literal names. Renaming them strands the existing
   graph in a detached volume and yields a silently empty database.
 - **Container healthcheck state lives at a different path per engine.**
-  `.State.Health.Status` vs `.State.Healthcheck.Status`, and `inspect` returns
-  an *empty string* rather than an error for a template matching nothing — so a
-  wrong guess reads as "not healthy yet" and silently burns the retry loop.
-  `container_health` in `lib-engine.sh` tries both.
+  `.State.Health.Status` vs `.State.Healthcheck.Status`, and a template
+  matching neither is an *error with a non-zero exit* — not the empty string
+  it looks like it should return — so an unguarded `inspect` of this shape
+  aborts the caller under `set -e` with no explanation. `container_health` in
+  `lib-engine.sh` tries both paths and guards each call with `|| true`.
 - **Rootless Podman does not survive a reboot.** No daemon means `--restart`
   only holds while the user's Podman session lives. `setup-local.sh` offers a
   systemd user unit plus `loginctl enable-linger`; `check-health.sh` reports

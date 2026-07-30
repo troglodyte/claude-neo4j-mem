@@ -19,6 +19,8 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
   exit 1
 }
 CONTAINER="claude-neo4j-memory"
+# shellcheck source=scripts/lib-engine.sh
+. "$SCRIPT_DIR/lib-engine.sh"
 CONFIG_FILE="$HOME/.claude-neo4j/config.json"
 FORMAT="plain"
 
@@ -93,14 +95,14 @@ if command -v cypher-shell >/dev/null 2>&1; then
     --format "$FORMAT" "$QUERY"
 fi
 
-if [ "$MODE" = "local" ] && docker inspect "$CONTAINER" >/dev/null 2>&1; then
-  if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" != "true" ]; then
-    echo "cypher.sh: container $CONTAINER exists but is not running (run: cd docker && docker compose up -d)" >&2
+if [ "$MODE" = "local" ] && resolve_engine && "$ENGINE" inspect "$CONTAINER" >/dev/null 2>&1; then
+  if [ "$("$ENGINE" inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" != "true" ]; then
+    echo "cypher.sh: container $CONTAINER exists but is not running (run: $ENGINE start $CONTAINER)" >&2
     exit 1
   fi
   # Inside the container Neo4j is always at the default bolt port, regardless
   # of whatever host port mapping NEO4J_BOLT_PORT set up.
-  exec docker exec -i "$CONTAINER" cypher-shell \
+  exec "$ENGINE" exec -i "$CONTAINER" cypher-shell \
     -a "bolt://localhost:7687" -u "$USERNAME" -p "$PASSWORD" -d "$DATABASE" \
     --format "$FORMAT" "$QUERY"
 fi
@@ -123,6 +125,6 @@ To install cypher-shell:
                  (unzip, then put bin/cypher-shell on your PATH)
 
 For local mode, starting the container also gives you one for free:
-  cd docker && docker compose up -d
+  scripts/setup-local.sh
 EOF
 exit 1

@@ -6,6 +6,28 @@ Version numbers track `.claude-plugin/plugin.json` and `package.json`, which are
 kept in step deliberately: `claude plugin update` compares that string, so a
 release that doesn't move it never reaches any other project.
 
+## 0.4.0 — 2026-07-30
+
+- **Added** Podman support alongside Docker. `scripts/lib-engine.sh` resolves
+  the container engine, preferring Podman (daemonless, rootless, no
+  licensing) and falling back to Docker; `CLAUDE_NEO4J_ENGINE` pins either.
+  Existing Docker installs keep working with no action required.
+- **Changed** `scripts/setup-local.sh` to create the container with a plain
+  `$ENGINE run` instead of `docker compose`, and to offer a consent-gated
+  Podman install when no engine is found — never a silent `sudo`, and a
+  non-interactive run refuses rather than guessing. `docker/docker-compose.yml`
+  is deleted; `docker/.env` keeps its path and role.
+- **Added** `npm run migrate-to-podman`, a one-shot Docker→Podman graph
+  migration: rehearses the restore on port 7688, verifies it against a
+  content fingerprint, and fails closed on any mismatch. The rehearsal
+  container is removed automatically; the old Docker container and its
+  volumes are kept untouched as a rollback safety net, and the command to
+  reclaim them once you're satisfied is printed at the end.
+- **Added** an optional systemd user unit, offered by `setup-local.sh`, for
+  rootless Podman boot persistence — rootless Podman has no daemon, so
+  without it the container does not come back after a reboot.
+  `check-health.sh` reports whether it's installed.
+
 ## 0.3.1 — 2026-07-23
 
 Subsystem tagging had grown a junk drawer; this empties it and closes the hole

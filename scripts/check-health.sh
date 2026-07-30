@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verifies the whole neo4j-memory plugin stack end to end: Docker container
+# Verifies the whole neo4j-memory plugin stack end to end: container
 # health, plugin config file, Neo4j auth/connectivity, and the MCP server's
 # JSON-RPC handshake. Prints PASS/FAIL per check and exits non-zero if any fail.
 # Usage: scripts/check-health.sh
@@ -14,21 +14,34 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
   exit 1
 }
 cd "$REPO_ROOT"
+# shellcheck source=scripts/lib-engine.sh
+. "$SCRIPT_DIR/lib-engine.sh"
 
 FAILURES=0
 
 pass() { echo "[OK]   $1"; }
 fail() { echo "[FAIL] $1"; FAILURES=$((FAILURES + 1)); }
 
-# 1. Docker container present and healthy
-if ! docker inspect claude-neo4j-memory >/dev/null 2>&1; then
-  fail "container claude-neo4j-memory not found (run: cd docker && docker compose up -d)"
+# 1. Container present and healthy, under whichever engine resolved
+if ! resolve_engine; then
+  fail "no container engine available (install Podman or Docker, then run scripts/setup-local.sh)"
+elif ! "$ENGINE" inspect claude-neo4j-memory >/dev/null 2>&1; then
+  fail "container claude-neo4j-memory not found under $ENGINE (run: scripts/setup-local.sh)"
 else
-  status="$(docker inspect -f '{{.State.Health.Status}}' claude-neo4j-memory 2>/dev/null || echo "unknown")"
+  status="$(container_health claude-neo4j-memory)"
   if [ "$status" = "healthy" ]; then
-    pass "container claude-neo4j-memory is healthy"
+    pass "container claude-neo4j-memory is healthy (engine: $ENGINE)"
   else
-    fail "container claude-neo4j-memory status is '$status', expected 'healthy'"
+    fail "container claude-neo4j-memory status is '$status', expected 'healthy' (engine: $ENGINE)"
+  fi
+fi
+
+# 1b. Rootless Podman needs a systemd user unit to survive a reboot.
+if [ "${ENGINE:-}" = "podman" ] && [ "$(uname -s)" = "Linux" ]; then
+  if systemctl --user is-enabled claude-neo4j.service >/dev/null 2>&1; then
+    pass "boot persistence: systemd user unit enabled"
+  else
+    fail "boot persistence: no systemd user unit — this container will not survive a reboot (run scripts/setup-local.sh to install one)"
   fi
 fi
 
