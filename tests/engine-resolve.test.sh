@@ -106,20 +106,48 @@ make_shim podman 1
 make_shim docker 1
 rm -f "$SHIM/sudo.log"
 
-# Declining the prompt must not escalate.
+# Piped stdin is not a tty, so this is deflected by the `[ ! -t 0 ]` guard
+# before `read` ever runs -- it does NOT exercise the decline arm of the
+# `case` (see the pty-backed cases below for that). It still must not escalate.
 printf 'n\n' | env PATH="$SHIM:/usr/bin:/bin" bash "$SETUP" >/dev/null 2>&1
 if [ -f "$SHIM/sudo.log" ]; then
-  fail "setup-local.sh ran sudo despite a declined prompt: $(cat "$SHIM/sudo.log")"
+  fail "setup-local.sh ran sudo with piped (non-tty) stdin: $(cat "$SHIM/sudo.log")"
 else
-  pass "declining the install prompt does not escalate"
+  pass "piped, non-tty stdin does not escalate (caught by the no-tty guard)"
 fi
 
 # Non-interactive (no tty, empty stdin) must not escalate either.
+rm -f "$SHIM/sudo.log"
 env PATH="$SHIM:/usr/bin:/bin" bash "$SETUP" </dev/null >/dev/null 2>&1
 if [ -f "$SHIM/sudo.log" ]; then
   fail "setup-local.sh ran sudo non-interactively: $(cat "$SHIM/sudo.log")"
 else
   pass "non-interactive invocation does not escalate"
+fi
+
+# The two cases above both go through the no-tty guard at `[ ! -t 0 ]` and
+# never reach the `read`/`case` at all -- a reordered or widened `case` could
+# not be caught by them. Drive a real pty (via `script`, which forkpty()s a
+# child) so the answer actually reaches `read -r -p` and the case arms below.
+rm -f "$SHIM/sudo.log"
+printf 'n\n' | script -qec "env PATH=\"$SHIM:/usr/bin:/bin\" $BASH_BIN \"$SETUP\"" /dev/null >/dev/null 2>&1
+if [ -f "$SHIM/sudo.log" ]; then
+  fail "setup-local.sh ran sudo despite an interactive (pty) decline: $(cat "$SHIM/sudo.log")"
+else
+  pass "an interactive (pty) decline does not escalate"
+fi
+
+# Complement of the case above: without this, a `case` that always fell
+# through to the refusal arm would pass every escalation test above while
+# being completely broken. Confirms "y" actually reaches sudo (via the
+# recording shim -- nothing is really installed, and the engine shims still
+# fail `info` afterwards so resolve_engine still reports failure).
+rm -f "$SHIM/sudo.log"
+printf 'y\n' | script -qec "env PATH=\"$SHIM:/usr/bin:/bin\" $BASH_BIN \"$SETUP\"" /dev/null >/dev/null 2>&1
+if [ -f "$SHIM/sudo.log" ] && grep -q 'apt-get' "$SHIM/sudo.log"; then
+  pass "an interactive (pty) accept does escalate via the recording shim"
+else
+  fail "setup-local.sh did not invoke sudo apt-get after an interactive (pty) accept"
 fi
 
 ((failures == 0)) || { printf '\n%d check(s) failed\n' "$failures"; exit 1; }
