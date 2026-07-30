@@ -192,11 +192,44 @@ EOF
     *) echo "Skipped. Re-run scripts/setup-local.sh after a reboot, or re-run this to be asked again."; return 0 ;;
   esac
 
+  # Podman's own --restart on this container can race with systemd's stop/
+  # restart of the unit we're about to generate (Podman itself warns against
+  # combining the two). Clearing it is best-effort: reboot survival works
+  # either way, only `systemctl stop/restart claude-neo4j.service` cleanliness
+  # is at stake if this fails, so a failure here is never fatal and the
+  # container is never recreated.
+  if ! podman update --restart=no claude-neo4j-memory >/dev/null 2>&1; then
+    echo "Note: could not clear the container's own restart policy; 'systemctl stop/restart claude-neo4j.service' may not behave cleanly. Continuing -- reboot survival still works." >&2
+  fi
+
+  # This whole install is opt-in convenience, never allowed to abort the
+  # mandatory configure step below (this script runs under set -e). Every
+  # fallible command here is therefore its own `if ! ...; then return 0; fi`
+  # rather than a bare statement, and a partial/empty unit file is removed
+  # rather than handed to daemon-reload/enable.
   mkdir -p "$HOME/.config/systemd/user"
-  podman generate systemd --name claude-neo4j-memory --restart-policy=always \
-    > "$HOME/.config/systemd/user/claude-neo4j.service"
-  systemctl --user daemon-reload
-  systemctl --user enable --now claude-neo4j.service
+  local unit_file="$HOME/.config/systemd/user/claude-neo4j.service"
+
+  if ! podman generate systemd --name claude-neo4j-memory --restart-policy=always \
+      > "$unit_file" 2>/dev/null; then
+    rm -f "$unit_file"
+    echo "Boot-persistence setup failed: 'podman generate systemd' did not succeed. This is safe to skip -- re-run scripts/setup-local.sh to retry." >&2
+    return 0
+  fi
+  if [ ! -s "$unit_file" ]; then
+    rm -f "$unit_file"
+    echo "Boot-persistence setup failed: 'podman generate systemd' produced an empty unit file. This is safe to skip -- re-run scripts/setup-local.sh to retry." >&2
+    return 0
+  fi
+  if ! systemctl --user daemon-reload; then
+    echo "Boot-persistence setup failed: 'systemctl --user daemon-reload' failed. This is safe to skip -- re-run scripts/setup-local.sh to retry." >&2
+    return 0
+  fi
+  if ! systemctl --user enable --now claude-neo4j.service; then
+    echo "Boot-persistence setup failed: could not enable/start the systemd unit. This is safe to skip -- re-run scripts/setup-local.sh to retry." >&2
+    return 0
+  fi
+
   loginctl enable-linger "$USER" 2>/dev/null || \
     echo "Note: 'loginctl enable-linger' failed; the unit starts on login rather than boot." >&2
   echo "Installed. The container will now start at boot."
