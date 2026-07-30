@@ -17,7 +17,7 @@
 - **Docker must keep working.** No existing user migrates. Every change is engine-agnostic, not a Docker-to-Podman swap.
 - **The Docker container and its volume are never written to.** Migration is copy-not-move; rollback stays available until the user runs the reclaim command by hand.
 - **All new `scripts/*.sh` resolve the repo root in two steps and assert `.claude-plugin/plugin.json` exists.** A single `cd "$(dirname X)/.."` degrades to `/` silently and `set -e` cannot catch it. `tests/launcher-path.test.sh` enforces this.
-- **The container volume is named `claude_neo4j_data` / `claude_neo4j_logs` with an explicit `docker_` prefix preserved** — see Task 4's trap. Do not "clean up" these names.
+- **Volume names differ per engine, deliberately.** On the **Docker** side they are `docker_claude_neo4j_data` / `docker_claude_neo4j_logs` — compose created them with its directory as a prefix, and `setup-local.sh` must keep those literals (Task 4's trap). On the **Podman** side they are `claude_neo4j_data` / `claude_neo4j_logs`, created fresh by the migration (Task 8). This asymmetry *is* the migration; it is not a typo to reconcile.
 - **Container name:** `claude-neo4j-memory`. **Image:** `neo4j:5-community`.
 - Version in `package.json` and `.claude-plugin/plugin.json` must stay in lockstep.
 
@@ -555,7 +555,16 @@ cat >"$SHIM/apt-get" <<'EOF'
 exit 0
 EOF
 chmod +x "$SHIM/apt-get"
-rm -f "$SHIM/podman" "$SHIM/docker" "$SHIM/sudo.log"
+
+# CRITICAL: shadow both engines with shims whose `info` FAILS, rather than
+# deleting them. setup-local.sh needs coreutils, so /usr/bin must stay on PATH
+# -- and /usr/bin/docker is the REAL docker driving the user's live graph. With
+# the shims absent, resolve_engine would find it, succeed, and this test would
+# start containers and rewrite ~/.claude-neo4j/config.json for real. $SHIM comes
+# first on PATH, so these shadow the real binaries and force the no-engine path.
+make_shim podman 1
+make_shim docker 1
+rm -f "$SHIM/sudo.log"
 
 # Declining the prompt must not escalate.
 printf 'n\n' | env PATH="$SHIM:/usr/bin:/bin" bash "$SETUP" >/dev/null 2>&1
@@ -577,7 +586,18 @@ fi
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `bash tests/engine-resolve.test.sh`
-Expected: FAIL on the two new cases — the Task 4 stub returns 1 without prompting, but it also never defines the prompt, so confirm the failure is the *absence* of the installer rather than a passing stub. (If both pass trivially, the stub is masking the test: temporarily add `sudo apt-get install -y podman` to the stub, re-run to see it fail, then remove it.)
+
+These two cases pass trivially against the Task 4 stub, which never escalates —
+a green result here proves nothing. Confirm the test can actually fail before
+trusting it: temporarily add `sudo apt-get install -y podman` as the first line
+of the stub's body, re-run, and see both cases report
+`setup-local.sh ran sudo...`. Then remove that line.
+
+A test that cannot fail is worse than no test, and this one guards an
+irreversible action.
+
+**Before running this at all, verify the shims are in place** (`make_shim docker 1`).
+Without them the test drives the real `/usr/bin/docker` against the live graph.
 
 - [ ] **Step 3: Replace the stub with the real installer**
 
