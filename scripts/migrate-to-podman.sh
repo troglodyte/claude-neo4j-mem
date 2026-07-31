@@ -2,7 +2,7 @@
 # One-shot Docker -> Podman migration for the local memory graph.
 #
 # Podman cannot see Docker's named volumes (separate storage backends), so the
-# graph moves by dump/load. Both sides run the identical neo4j:5-community
+# graph moves by dump/load. Both sides run the identical Neo4j 5 Community
 # image, so the dump is version-neutral and NEO4J_AUTH sets the new container's
 # password on first start.
 #
@@ -14,7 +14,8 @@
 # mounted database) and during the few-second cutover window itself. Until the
 # reclaim commands are run, rollback is always:
 #   podman stop claude-neo4j-memory && podman rm claude-neo4j-memory && docker start claude-neo4j-memory
-#   export CLAUDE_NEO4J_ENGINE=docker   # see the closing message for why
+# and nothing else: resolve_engine follows whichever engine is running the
+# container, so that last command is what hands the tooling back to Docker.
 set -euo pipefail
 
 PROG="migrate-to-podman.sh"
@@ -36,7 +37,13 @@ ENGINE="podman"
 
 CONTAINER="claude-neo4j-memory"
 REHEARSAL="claude-neo4j-rehearsal"
-IMAGE="neo4j:5-community"
+# Fully qualified, deliberately: Docker expands the unqualified spelling to
+# this, but Podman refuses to guess a registry unless the host configures
+# `unqualified-search-registries` (Debian and Ubuntu ship it commented out), and
+# Neo4j is not one of the short-name aliases in shortnames.conf. The short form
+# therefore fails on a stock Podman host while working fine under Docker.
+# Docker accepts the long form unchanged, so one spelling serves both.
+IMAGE="docker.io/library/neo4j:5-community"
 die() { echo "$PROG: $*" >&2; exit 1; }
 
 command -v podman >/dev/null 2>&1 || die "podman is not installed (run scripts/setup-local.sh)"
@@ -222,13 +229,12 @@ Migration complete. Podman now serves the graph on 7687.
             time.
   Verify:   scripts/check-health.sh
   Rollback: podman stop $CONTAINER && podman rm $CONTAINER && docker start $CONTAINER
-            then: export CLAUDE_NEO4J_ENGINE=docker (and persist it, e.g. in
-            your shell profile) - resolve_engine prefers podman whenever it is
-            merely installed and runnable, regardless of whether $CONTAINER
-            exists on that side, so without this every script here
-            (check-health.sh, backup.sh, restore.sh, cypher.sh) would keep
-            failing against a Podman container that no longer exists, even
-            though Docker is serving the graph again.
+            That is the whole rollback - no environment variable to set or
+            unset. resolve_engine picks whichever engine is actually running
+            $CONTAINER, so starting Docker's again is what points
+            check-health.sh, backup.sh, restore.sh and cypher.sh back at it.
+            Pin it with CLAUDE_NEO4J_ENGINE=docker only if you want to
+            override that for some other reason.
 
 The Docker container and its volume are untouched. Once you are satisfied,
 reclaim that space with:

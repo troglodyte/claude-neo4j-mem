@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# resolve_engine must prefer podman, fall back to docker, honour an explicit
-# override, and refuse anything else. Uses PATH shims so no engine is required
-# to run these -- same technique as launcher-path.test.sh.
+# resolve_engine must follow the graph, not a fixed preference: whichever
+# engine is actually running claude-neo4j-memory wins, because picking the
+# other one hands the caller a different (usually empty or stale) database
+# with no error. Only when that says nothing does the static docker-then-podman
+# order decide. It must also honour an explicit override and refuse anything
+# else. Uses PATH shims so no engine is required to run these -- same technique
+# as launcher-path.test.sh.
 set -uo pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && cd .. && pwd -P)"
@@ -24,20 +28,37 @@ failures=0
 fail() { printf 'FAIL: %s\n' "$1"; failures=$((failures + 1)); }
 pass() { printf 'ok: %s\n' "$1"; }
 
-# A shim that succeeds or fails `info` on demand; any other verb echoes itself.
+# A shim that succeeds or fails `info` on demand, reports whether it has a
+# claude-neo4j-memory container and whether that container is running, and
+# echoes itself for any other verb. Defaults are "usable engine, no container",
+# which is what the pre-existing cases below assume.
+#
 # Shebang is the resolved absolute path, not "#!/usr/bin/env bash": once
 # try_resolve narrows PATH to $SHIM alone (see above), `env` inside a
 # "/usr/bin/env bash" shebang would fail to find bash the same way the outer
 # invocation would have.
 make_shim() {
-  local name="$1" info_rc="$2"
+  local name="$1" info_rc="$2" inspect_rc="${3:-1}" running="${4:-false}"
   cat >"$SHIM/$name" <<EOF
 #!$BASH_BIN
 if [ "\$1" = "info" ]; then exit $info_rc; fi
+if [ "\$1" = "inspect" ]; then
+  [ $inspect_rc -eq 0 ] || exit $inspect_rc
+  # Answer the -f '{{.State.Running}}' form; a bare inspect just succeeds.
+  for arg in "\$@"; do
+    if [ "\$arg" = '{{.State.Running}}' ]; then printf '%s\n' "$running"; exit 0; fi
+  done
+  exit 0
+fi
 printf '%s %s\n' "$name" "\$*"
 EOF
   chmod +x "$SHIM/$name"
 }
+
+# Readable aliases for make_shim's container arguments.
+NO_CONTAINER=(1 false)
+STOPPED_CONTAINER=(0 false)
+RUNNING_CONTAINER=(0 true)
 
 # Run resolve_engine in a subshell with a controlled PATH, echo the result.
 try_resolve() {
@@ -47,9 +68,54 @@ try_resolve() {
   ' "$LIB" 2>/dev/null
 }
 
-# 1. Both present and working -> podman wins.
-make_shim podman 0; make_shim docker 0
-[ "$(try_resolve)" = "podman" ] && pass "prefers podman when both work" \
+# 1. Both usable, neither holding the graph -> the static order picks podman.
+#    Nothing is at stake in this case (there is no graph on either side yet),
+#    so the better engine to start on wins: daemonless, rootless, no licensing.
+#    The cases below are what keep this from touching anyone who already has a
+#    container -- the tie-break only ever decides a fresh machine.
+make_shim podman 0 "${NO_CONTAINER[@]}"; make_shim docker 0 "${NO_CONTAINER[@]}"
+[ "$(try_resolve)" = "podman" ] && pass "prefers podman when both work and neither has the container" \
+  || fail "expected podman, got: $(try_resolve)"
+
+# 1a. Podman is holding the graph -> podman, despite docker being preferred.
+#     This is the post-migration machine. Answering "docker" here would point
+#     every script at the pre-migration volume, which still exists (the
+#     migration stops that container but never deletes it) and would read as a
+#     working database that has silently lost every observation since.
+make_shim podman 0 "${RUNNING_CONTAINER[@]}"; make_shim docker 0 "${NO_CONTAINER[@]}"
+[ "$(try_resolve)" = "podman" ] && pass "follows the graph to podman when it holds the container" \
+  || fail "expected podman, got: $(try_resolve)"
+
+# 1b. Both engines have a container named claude-neo4j-memory -- exactly what
+#     the migration leaves behind, since Docker's is kept stopped for rollback.
+#     Presence alone cannot separate them; running state can.
+make_shim podman 0 "${RUNNING_CONTAINER[@]}"; make_shim docker 0 "${STOPPED_CONTAINER[@]}"
+[ "$(try_resolve)" = "podman" ] && pass "prefers the running container when both engines have one" \
+  || fail "expected podman, got: $(try_resolve)"
+
+# 1c. The same test in the other direction, so a rule that just hardcodes
+#     podman-when-both would not pass. Rolled back to Docker: Docker runs, the
+#     Podman container is stopped but still present.
+make_shim podman 0 "${STOPPED_CONTAINER[@]}"; make_shim docker 0 "${RUNNING_CONTAINER[@]}"
+[ "$(try_resolve)" = "docker" ] && pass "follows a running container back to docker after a rollback" \
+  || fail "expected docker, got: $(try_resolve)"
+
+# 1d. Neither container runs, but only podman has one. Stopped is still where
+#     the data is; starting a fresh container on the other engine would create
+#     an empty volume instead.
+make_shim podman 0 "${STOPPED_CONTAINER[@]}"; make_shim docker 0 "${NO_CONTAINER[@]}"
+[ "$(try_resolve)" = "podman" ] && pass "prefers a stopped container over no container at all" \
+  || fail "expected podman, got: $(try_resolve)"
+
+# 1e. Container probing must never override an unusable engine: podman holds
+#     the graph but its `info` fails, so docker is the only thing that can run.
+make_shim podman 1 "${RUNNING_CONTAINER[@]}"; make_shim docker 0 "${NO_CONTAINER[@]}"
+[ "$(try_resolve)" = "docker" ] && pass "does not pick an unusable engine just because it holds the container" \
+  || fail "expected docker, got: $(try_resolve)"
+
+# 1f. Docker absent entirely -> podman, container or not.
+rm -f "$SHIM/docker"; make_shim podman 0 "${NO_CONTAINER[@]}"
+[ "$(try_resolve)" = "podman" ] && pass "falls back to podman when docker is absent" \
   || fail "expected podman, got: $(try_resolve)"
 
 # 2. Podman present but not functional (mac: machine not started) -> docker.

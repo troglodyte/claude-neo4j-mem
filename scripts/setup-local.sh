@@ -132,6 +132,13 @@ else
   LOGS_VOLUME="docker_claude_neo4j_logs"
 fi
 
+# The image is fully qualified because Podman will not guess a registry for an
+# unqualified name unless the host sets `unqualified-search-registries`
+# (commented out by default on Debian/Ubuntu), and Neo4j has no entry in
+# shortnames.conf either -- so the short spelling fails here under Podman while
+# working under Docker, which expands it silently. Docker accepts the long form
+# unchanged. Same reasoning as migrate-to-podman.sh's $IMAGE, and
+# tests/image-name.test.sh guards both.
 start_container() {
   "$ENGINE" run -d \
     --name claude-neo4j-memory \
@@ -147,7 +154,7 @@ start_container() {
     --health-interval 5s \
     --health-timeout 5s \
     --health-retries 30 \
-    neo4j:5-community >/dev/null
+    docker.io/library/neo4j:5-community >/dev/null
 }
 
 if ! "$ENGINE" inspect claude-neo4j-memory >/dev/null 2>&1; then

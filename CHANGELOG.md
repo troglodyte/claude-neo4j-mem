@@ -6,6 +6,55 @@ Version numbers track `.claude-plugin/plugin.json` and `package.json`, which are
 kept in step deliberately: `claude plugin update` compares that string, so a
 release that doesn't move it never reaches any other project.
 
+## 0.4.1 — 2026-07-31
+
+- **Fixed** Podman support failing outright on a stock Debian/Ubuntu host. The
+  Neo4j image was named unqualified, which Docker silently expands to
+  `docker.io/library/...` and Podman refuses to guess: with
+  `unqualified-search-registries` commented out (the distro default) and no
+  `shortnames.conf` alias for Neo4j, `setup-local.sh`, the migration's
+  rehearsal and its cutover all died on *short-name did not resolve to an
+  alias*. Now fully qualified, which Docker accepts unchanged. Guarded by
+  `tests/image-name.test.sh` — the trap is that popular images (alpine, nginx)
+  *do* ship short-name aliases, so a smoke test with one of those passes and
+  hides the problem.
+- **Changed** engine resolution to follow the container before applying any
+  preference. 0.4.0 preferred Podman whenever it was merely installed and
+  runnable, so installing Podman on a working Docker machine — for any reason
+  at all — silently pointed every script at a Podman container that didn't
+  exist. Among engines that are usable, `resolve_engine` now picks whichever is
+  *running* `claude-neo4j-memory`, then whichever merely *has* it; Podman still
+  wins where that settles nothing, with Docker the fallback. Running state is
+  the deciding signal because `migrate-to-podman.sh` keeps the stopped Docker
+  container for rollback, so after a migration both engines have one by that
+  name. Rollback consequently no longer needs `CLAUDE_NEO4J_ENGINE=docker` —
+  `docker start` is the whole of it — and the closing message says so.
+- **Fixed** a failed `PreCompact` capture being dropped with no way to retry
+  it. Only `SessionEnd` left a pending input for the `SessionStart` sweep, so
+  an inline failure had nothing to re-trigger it; the following `SessionEnd`
+  re-covered the same range only while it still fit under the `50k × 3` chunk
+  ceiling, and the sessions long enough to compact are the ones that don't.
+  Pending inputs are now `*.pending.json`, written by both paths; the sweep
+  still accepts the older `*.sessionend.json` name.
+- **Fixed** capture timeouts rejecting with the elapsed time alone, discarding
+  the killed child's stdout and stderr and making every timeout in
+  `capture.log` unexplainable after the fact. The error now carries the child's
+  output, and distinguishes a child that produced nothing at all.
+- **Fixed** `PreCompact` logging only its failures. Successes went to stdout as
+  a `systemMessage` and never to `capture.log`, leaving a failures-only record
+  that made a working path look like one that had never run.
+- **Changed** the detached worker's log label to name the hook the pending
+  input actually came from, rather than always claiming `SessionEnd` — which
+  stopped being true once `PreCompact` could queue one. A corrupt input file is
+  still reported as `capture worker`, since there is no hook name to read off
+  an input that failed to parse.
+- **Added** `tests/capture-hook.test.js`, covering both paths through the real
+  hook entry point, and `tests/extract-timeout.test.js`. The success case
+  writes to Neo4j and skips itself where no container is reachable.
+  `tests/engine-resolve.test.sh` gained seven cases for the resolution rule
+  above, including both directions of the migrate/rollback tie so a rule that
+  simply hardcoded the other engine could not pass.
+
 ## 0.4.0 — 2026-07-30
 
 - **Added** Podman support alongside Docker. `scripts/lib-engine.sh` resolves

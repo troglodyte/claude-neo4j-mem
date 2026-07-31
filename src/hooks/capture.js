@@ -14,9 +14,21 @@ import { extractStructured } from "../lib/extract.js";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const LOG_FILE = path.join(CONFIG_DIR, "capture.log");
-// Presence of this env var means "I am the detached SessionEnd worker" - it
-// carries the path to the hook input file instead of reading stdin.
+// Presence of this env var means "I am a detached capture worker" - it carries
+// the path to the hook input file instead of reading stdin. Both the SessionEnd
+// detach and the SessionStart sweep (which now retries PreCompact too) use it.
 const INPUT_FILE_ENV = "CLAUDE_NEO4J_CAPTURE_INPUT_FILE";
+// Suffix for an input parked for the SessionStart sweep. It was
+// ".sessionend.json" back when only SessionEnd could leave one behind; the
+// inline PreCompact path now queues too, so the name no longer says SessionEnd.
+// The sweep still accepts the old suffix, because a file written by an earlier
+// version can be sitting in a state dir right now and is still retryable.
+const PENDING_SUFFIX = ".pending.json";
+const LEGACY_PENDING_SUFFIX = ".sessionend.json";
+
+function isPendingInput(file) {
+  return file.endsWith(PENDING_SUFFIX) || file.endsWith(LEGACY_PENDING_SUFFIX);
+}
 
 // Capture used to read only the last 15k chars of a session. Measured against
 // real transcripts that dropped 66% of extractable content (89% for the worst
@@ -40,11 +52,14 @@ const MAX_CAPTURE_ATTEMPTS = 3;
 // only sweep ones old enough that no in-flight worker could still hold them.
 const RETRY_AFTER_MS = 10 * 60 * 1000;
 const STATE_FILE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-// Extraction measures ~11s for a full 50k-char window, so these are outlier
-// headroom rather than expected duration: observed timeouts came from
-// contention, not from the size of the input. The detached worker answers to
-// nobody and can wait; the inline PreCompact path must finish inside the hook's
-// 100s timeout or Claude Code cancels it.
+// Extraction measures ~11s for a full 50k-char window, but that is a median,
+// not a bound: capture.log has recorded timeouts at 90s, 80s, and once at the
+// detached path's full 180s, so the tail is real and its cause is not yet
+// known. (A previous comment here blamed contention rather than input size;
+// that was never evidence-backed, and the timeout used to discard the evidence
+// that could have settled it.) The detached worker answers to nobody and can
+// wait; the inline PreCompact path must finish inside the hook's 100s timeout
+// or Claude Code cancels it.
 const CAPTURE_TIMEOUT_MS = Number(process.env.CLAUDE_NEO4J_CAPTURE_TIMEOUT_MS ?? 180_000);
 const PRECOMPACT_TIMEOUT_MS = 80_000;
 
@@ -286,10 +301,20 @@ async function runCapture({ sessionId, transcriptPath, cwd, maxChunks = MAX_CHUN
 // claude-mem's worker-daemon pattern gets for free) so the hook itself
 // returns before teardown cancels it, and extraction finishes on its own
 // time, decoupled from this process's lifetime.
-function detachSessionEndCapture(input) {
+/**
+ * Parks a hook input where sweepPendingCaptures will find it. `attempt` is the
+ * number of tries already spent, so a caller that has itself just failed
+ * (PreCompact) passes 1 and doesn't get the full budget over again.
+ */
+function queueForRetry(input, attempt = 0) {
   ensureStateDir();
-  const inputFile = path.join(STATE_DIR, `${input.session_id}-${Date.now()}.sessionend.json`);
-  fs.writeFileSync(inputFile, JSON.stringify(input));
+  const inputFile = path.join(STATE_DIR, `${input.session_id}-${Date.now()}${PENDING_SUFFIX}`);
+  fs.writeFileSync(inputFile, JSON.stringify(attempt ? { ...input, captureAttempt: attempt } : input));
+  return inputFile;
+}
+
+function detachSessionEndCapture(input) {
+  const inputFile = queueForRetry(input);
 
   const child = spawn(process.execPath, [SCRIPT_PATH], {
     detached: true,
@@ -305,16 +330,23 @@ async function runDetachedWorker(inputFile) {
   try {
     input = JSON.parse(fs.readFileSync(inputFile, "utf8"));
   } catch (error) {
-    log(`SessionEnd worker: failed to read input file ${inputFile}: ${error.message}`);
+    // Deliberately not the derived label below: the input is what failed to
+    // parse, so there is no hook name to read off it yet, and reaching for one
+    // here throws before this line can report anything.
+    log(`capture worker: failed to read input file ${inputFile}: ${error.message}`);
     return;
   }
 
   const { session_id: sessionId, transcript_path: transcriptPath, cwd } = input;
   const attempt = (input.captureAttempt ?? 0) + 1;
+  // Pending inputs come from both hooks now, so the label can't be hardcoded:
+  // a retry filed under the wrong hook sends the next reader down the wrong
+  // path. SessionEnd inputs still read "SessionEnd worker", as before.
+  const label = `${input.hook_event_name ?? "capture"} worker`;
   try {
     const { added, chunks, dropped } = await runCapture({ sessionId, transcriptPath, cwd });
     log(
-      `SessionEnd worker: captured ${added} observation(s) for session ${sessionId} ` +
+      `${label}: captured ${added} observation(s) for session ${sessionId} ` +
         `(${chunks} chunk(s)${dropped ? `, ${dropped} chars dropped` : ""}${attempt > 1 ? `, attempt ${attempt}` : ""})`
     );
     removeInput(inputFile);
@@ -324,10 +356,10 @@ async function runDetachedWorker(inputFile) {
     // retryable - but only if its input survives. Keep it for the SessionStart
     // sweep until we've genuinely given up.
     if (attempt >= MAX_CAPTURE_ATTEMPTS) {
-      log(`SessionEnd worker: capture failed for session ${sessionId} after ${attempt} attempt(s), giving up: ${error.message}`);
+      log(`${label}: capture failed for session ${sessionId} after ${attempt} attempt(s), giving up: ${error.message}`);
       removeInput(inputFile);
     } else {
-      log(`SessionEnd worker: capture failed for session ${sessionId} (attempt ${attempt}, will retry): ${error.message}`);
+      log(`${label}: capture failed for session ${sessionId} (attempt ${attempt}, will retry): ${error.message}`);
       try {
         fs.writeFileSync(inputFile, JSON.stringify({ ...input, captureAttempt: attempt }));
       } catch {
@@ -366,7 +398,7 @@ export function sweepPendingCaptures({ now = Date.now() } = {}) {
   }
 
   for (const file of files) {
-    if (!file.endsWith(".sessionend.json")) continue;
+    if (!isPendingInput(file)) continue;
     const inputFile = path.join(STATE_DIR, file);
     try {
       // Age gate: a fresh file probably belongs to a worker still running, and
@@ -397,7 +429,7 @@ export function sweepPendingCaptures({ now = Date.now() } = {}) {
 export function pruneStaleState({ now = Date.now() } = {}) {
   try {
     for (const file of fs.readdirSync(STATE_DIR)) {
-      if (!file.endsWith(".json") || file.endsWith(".sessionend.json")) continue;
+      if (!file.endsWith(".json") || isPendingInput(file)) continue;
       const full = path.join(STATE_DIR, file);
       if (now - fs.statSync(full).mtimeMs > STATE_FILE_TTL_MS) fs.unlinkSync(full);
     }
@@ -438,13 +470,22 @@ async function main() {
 
   try {
     // Inline path, bounded by the hook's 100s timeout, so one window only.
-    const { added } = await runCapture({
+    const { added, chunks, dropped } = await runCapture({
       sessionId,
       transcriptPath,
       cwd,
       maxChunks: PRECOMPACT_MAX_CHUNKS,
       timeoutMs: PRECOMPACT_TIMEOUT_MS,
     });
+
+    // Only failures used to reach capture.log on this path, so the operator
+    // record of PreCompact was failures-only - which is exactly why it read as
+    // a path that had never run at all. The detached worker has always logged
+    // both outcomes; match it.
+    log(
+      `${eventName ?? "capture"}: captured ${added} observation(s) for session ${sessionId}` +
+        (chunks ? ` (${chunks} chunk(s)${dropped ? `, ${dropped} chars dropped` : ""})` : "")
+    );
 
     if (eventName === "PreCompact" && added > 0) {
       process.stdout.write(
@@ -457,7 +498,17 @@ async function main() {
     }
   } catch (error) {
     process.stderr.write(`claude-neo4j: capture failed: ${error.message}\n`);
-    log(`${eventName ?? "capture"}: failed: ${error.message}`);
+    log(`${eventName ?? "capture"}: failed for session ${sessionId}: ${error.message}`);
+    // lastLine only advances on success, so this window is still extractable -
+    // but nothing would ever re-run it. SessionEnd's own failures survive as a
+    // pending input; without this, PreCompact's did not, and the following
+    // SessionEnd only re-covers the range while it still fits under the chunk
+    // ceiling. Sessions long enough to compact are the ones that don't.
+    try {
+      queueForRetry(input, 1);
+    } catch (queueError) {
+      log(`${eventName ?? "capture"}: could not queue session ${sessionId} for retry: ${queueError.message}`);
+    }
     process.stdout.write("{}");
   } finally {
     await closeDriver();

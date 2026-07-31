@@ -12,6 +12,17 @@ const CLAUDE_BIN = process.env.CLAUDE_NEO4J_CAPTURE_CLI ?? "claude";
 // Model alias, not a raw ID: passed straight through to `claude --model`.
 const DEFAULT_MODEL = process.env.CLAUDE_NEO4J_CAPTURE_MODEL ?? "haiku";
 
+// Silence and noise fail differently: a child that never wrote a byte stalled
+// before it got anywhere (auth prompt, network hang), while one that wrote and
+// then stopped got far enough to be talking to the API. Say which.
+function describeChildOutput(stdout, stderr) {
+  const tail = (text) => text.trim().slice(-500);
+  const parts = [];
+  if (stderr.trim()) parts.push(`stderr: ${tail(stderr)}`);
+  if (stdout.trim()) parts.push(`stdout: ${tail(stdout)}`);
+  return parts.length ? `killed; ${parts.join("; ")}` : "killed; child produced no output";
+}
+
 export function runClaudeExtraction({ input, systemPrompt, schema, timeoutMs, model = DEFAULT_MODEL }) {
   return new Promise((resolve, reject) => {
     const args = [
@@ -38,9 +49,14 @@ export function runClaudeExtraction({ input, systemPrompt, schema, timeoutMs, mo
     let stdout = "";
     let stderr = "";
 
+    // A timeout used to reject with the duration alone, discarding the stdout
+    // and stderr collected right up to the kill. That made every timeout in
+    // capture.log permanently unexplainable - the tail is rare enough that it
+    // can't be reproduced on demand, so the one run that hit it was the only
+    // evidence there was ever going to be. Carry the child's own words out.
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
-      reject(new Error(`claude extraction timed out after ${timeoutMs}ms`));
+      reject(new Error(`claude extraction timed out after ${timeoutMs}ms (${describeChildOutput(stdout, stderr)})`));
     }, timeoutMs);
 
     child.stdout.on("data", (chunk) => (stdout += chunk));

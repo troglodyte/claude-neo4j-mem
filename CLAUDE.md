@@ -11,10 +11,18 @@ can't tell you — the traps.
 - **Local Neo4j runs on this machine** in a container named
   `claude-neo4j-memory` (bolt `7687`, http `7474`), created by
   `scripts/setup-local.sh` via a plain `$ENGINE run` — no compose file.
-  `scripts/lib-engine.sh` resolves `$ENGINE`, preferring Podman and falling
-  back to Docker; `CLAUDE_NEO4J_ENGINE` pins either. Credentials live in
+  `scripts/lib-engine.sh` resolves `$ENGINE` by following the container (see
+  below); `CLAUDE_NEO4J_ENGINE` pins either. Credentials live in
   `docker/.env` (gitignored) — the directory name predates Podman support and
   stays as-is.
+- **This machine runs the graph under Podman**, migrated from Docker on
+  2026-07-31 with a `systemd --user` unit (`claude-neo4j.service`) plus
+  `Linger=yes` for reboot survival. The Docker container and its
+  `docker_claude_neo4j_*` volumes are still there, stopped, deliberately: they
+  are the rollback, and nothing reclaims them until someone runs the `docker
+  rm`/`docker volume rm` pair that `migrate-to-podman.sh` prints. Both engines
+  therefore have a container named `claude-neo4j-memory` here — which is
+  exactly why `resolve_engine` scores running above stopped.
 - **Plugin config**: `~/.claude-neo4j/config.json`, pointed at that container
   (mode: local).
 - `origin` is `git@github.com:troglodyte/claude-neo4j-mem.git`; `main` tracks
@@ -174,7 +182,32 @@ normal. Several ran that way before it was noticed.
   progress logged to `~/.claude-neo4j/capture.log` since stdio is ignored) and
   returns immediately. Extraction measures ~11s for a full 50k window, so the
   timeouts are outlier headroom, not expected duration: 180s detached, 80s
-  inline.
+  inline. **The tail is much longer than 11s suggests** — `capture.log` records
+  timeouts firing at 90s, 80s, and once at the detached path's full 180s. Why
+  is not yet known; treat the ~11s as a median, not a bound, and don't raise a
+  timeout without evidence from the message itself (below).
+- **Every failed capture is queued for retry, whichever hook it came from.**
+  Only `SessionEnd` used to leave a pending input behind, so a failed
+  `PreCompact` had nothing to re-trigger it. That looked survivable — `lastLine`
+  advances only on success (`runCapture`), so the next `SessionEnd` re-reads the
+  same range — but the re-read only covers it while it fits under the
+  `50k × 3` chunk ceiling, and chunks are taken from the *end*. A session long
+  enough to compact is exactly the one that outgrows the ceiling, dropping the
+  oldest content first. Pending inputs are `*.pending.json`; the sweep still
+  accepts the older `*.sessionend.json` name, since a file written by an
+  earlier version is still retryable.
+- **A capture timeout carries the killed child's output** (`extract.js`).
+  It used to reject with the duration alone, discarding the stdout/stderr
+  collected right up to the `SIGKILL` — which made every timeout in the log
+  permanently unexplainable, since the tail is too rare to reproduce on demand.
+  Silence and noise are reported differently: a child that never wrote a byte
+  stalled before reaching the API, one that wrote and stopped did not.
+- **Both capture paths log both outcomes.** `PreCompact` used to write its
+  success only as a `systemMessage` on stdout and nothing to `capture.log`, so
+  the operator record of that path was failures-only — which is why it read for
+  weeks as a path that had never fired at all, when it had in fact both
+  succeeded (07-22) and failed (07-28). A path whose successes are invisible
+  will be mistaken for a path that never runs.
 - **`capture.js` exports `sweepPendingCaptures`/`pruneStaleState` for
   `session-start.js`**, so its hook body is guarded by an entry-point check.
   Importing it must not fire a capture.
@@ -190,10 +223,29 @@ normal. Several ran that way before it was noticed.
   `http://localhost:7474` already is one) and a background transcript-watcher
   daemon (the `PreCompact`/`SessionEnd` hooks already cover it).
 - **Podman and Docker are both supported; `scripts/lib-engine.sh` picks one.**
-  Podman is preferred (daemonless, rootless, no licensing), Docker is the
-  fallback, `CLAUDE_NEO4J_ENGINE` pins either. Podman **cannot see Docker's
-  named volumes** — separate storage backends — so switching engines moves data
-  by dump/load, not by pointing at the same volume.
+  Podman **cannot see Docker's named volumes** — separate storage backends — so
+  switching engines moves data by dump/load, not by pointing at the same
+  volume. `CLAUDE_NEO4J_ENGINE` pins either.
+- **`resolve_engine` follows the container first, and only then prefers
+  Podman.** Naming the wrong engine never errors; it opens a different, usually
+  empty database, so a bare preference is the wrong shape of rule. Among
+  engines that are installed *and* whose `info` succeeds (usability is a hard
+  gate, checked before any container probe), it scores each: 2 for running
+  `claude-neo4j-memory`, 1 for having it stopped, 0 for not having it — highest
+  wins, `podman`-first loop order settling ties, and a 2 short-circuits the
+  loop so the common case never pays for the second engine's `info`.
+  **The preference therefore only ever decides a machine with no container on
+  either side.** A bare preference used to be the whole rule, and the moment
+  Podman was installed on this machine it moved every script onto a
+  nonexistent Podman container while Docker was serving the graph — that is
+  the bug the scoring exists to prevent, in either direction.
+- **The running/stopped distinction in `resolve_engine` is load-bearing.**
+  `migrate-to-podman.sh` **stops** the Docker container and keeps it for
+  rollback, so after a migration *both* engines have a container named
+  `claude-neo4j-memory` and presence alone cannot say which one holds the live
+  graph — scoring stopped below running is what does. It also makes rollback
+  just `docker start` with no `CLAUDE_NEO4J_ENGINE` to set or unset, which is
+  what the script's closing message now says.
 - **The two engines use different volume names, deliberately.** Docker's stay
   `docker_claude_neo4j_data`/`_logs` — compose created them with its directory
   as a prefix, and `setup-local.sh` must never rename them: doing so strands
@@ -291,6 +343,18 @@ tree after any `claude plugin` command run inside this repo.
 
 ## Open
 
-- `PreCompact` auto-capture is still only verified with a synthetic transcript
-  piped into `capture.js`. `SessionEnd` is verified against a real hook
-  firing; the synchronous `PreCompact` path needs a real compaction event.
+- **Why extraction sometimes takes minutes is unknown.** Five timeouts in
+  ~300 log lines, at 90s/80s/180s — including the detached path's full
+  headroom, so this is not simply "the inline budget is too tight". The code
+  that would have explained it discarded the evidence; that's fixed, so the
+  *next* occurrence should be diagnosable from `capture.log`. Until one lands,
+  raising a timeout would be a symptom fix. (The old comment blaming
+  "contention, not the size of the input" was never evidence-backed.)
+- ~~`PreCompact` unverified against a real compaction~~ — **closed 2026-07-31.**
+  A real `/compact` wrote `PreCompact: captured 0 observation(s) for session …
+  (1 chunk(s))` to `capture.log`, a line that could not have existed before the
+  same day's logging fix. It is also covered in `tests/capture-hook.test.js`
+  through the real hook entry point (real Neo4j writes, faked model, both
+  outcomes); that test skips itself where no container is reachable. Note the
+  count was **0** — a legitimate result, but it means the write path itself is
+  still only proven by the test, not by that run.

@@ -8,8 +8,9 @@ project (by git remote), and are recallable across sessions and machines.
 
 Works against either:
 
-- **Local**: a Neo4j container run via Podman or Docker (default; Podman
-  preferred when present, Docker fully supported as a fallback).
+- **Local**: a Neo4j container run via Podman or Docker (default; both fully
+  supported — whichever one is already running the container wins, Podman
+  otherwise).
 - **Remote / web-based**: any hosted Neo4j reachable over `bolt`/`neo4j+s` — e.g.
   [Neo4j Aura](https://neo4j.com/product/auradb/), or a self-hosted server on the
   network. Only the connection URI and credentials change.
@@ -84,12 +85,12 @@ the same entity name don't collide. `project` comes from
 ## Setup
 
 **Quick start (local):** `npm install && scripts/setup-local.sh` does
-everything below — resolves a container engine (Podman preferred, Docker as a
-fallback; offers to install Podman after an explicit prompt if neither is
-present), generates `docker/.env` with a random password if missing, starts
-the container, waits for health, and configures the plugin against it. Safe
-to re-run any time. `CLAUDE_NEO4J_ENGINE=docker` (or `podman`) pins one
-explicitly instead of relying on the preference order. Without a container
+everything below — resolves a container engine (whichever one already runs the
+container, else Podman, else Docker; offers to install Podman after an explicit
+prompt if neither is present), generates `docker/.env` with a random password
+if missing, starts the container, waits for health, and configures the plugin
+against it. Safe to re-run any time. `CLAUDE_NEO4J_ENGINE=docker` (or
+`podman`) pins one explicitly instead of relying on that. Without a container
 engine, use the remote/Aura path in step 2.
 
 ### 1. Install dependencies
@@ -110,12 +111,33 @@ cd ..
 scripts/setup-local.sh
 ```
 
-`scripts/setup-local.sh` resolves the engine — Podman preferred, Docker as a
-fallback — and creates the container with a plain `$ENGINE run` (there's no
-compose file to run). If neither engine is present it offers to install
-Podman, but only after an explicit prompt; a non-interactive run refuses
-rather than assume consent. `CLAUDE_NEO4J_ENGINE=docker` (or `podman`) pins
-one explicitly.
+`scripts/setup-local.sh` resolves the engine — see
+[Choosing an engine](#choosing-an-engine) — and creates the container with a
+plain `$ENGINE run` (there's no compose file to run). If neither engine is
+present it offers to install Podman, but only after an explicit prompt; a
+non-interactive run refuses rather than assume consent.
+`CLAUDE_NEO4J_ENGINE=docker` (or `podman`) pins one explicitly.
+
+### Choosing an engine
+
+Podman and Docker cannot see each other's named volumes, so naming the wrong
+one doesn't fail — it silently opens a *different*, usually empty database.
+The resolver therefore follows the data first, and only then a preference:
+
+1. `CLAUDE_NEO4J_ENGINE`, if set, always wins.
+2. Otherwise, among engines that are installed and whose `info` succeeds,
+   whichever is **running** `claude-neo4j-memory` — then whichever merely
+   **has** it stopped.
+3. If that settles nothing (a fresh machine, neither engine has the
+   container), **Podman**, then Docker.
+
+Podman is preferred where there's a free choice — daemonless, rootless, no
+licensing — and Docker is a fully supported fallback wherever Podman isn't
+installed or isn't usable. Step 2 is what keeps that preference from
+disturbing anyone: an existing Docker install stays on Docker even after
+Podman appears on the machine, because Docker is the engine holding the
+container. Moving an existing graph across is `npm run migrate-to-podman`;
+nothing else copies data between engines.
 
 **Remote (e.g. Aura):** create an instance at
 [console.neo4j.io](https://console.neo4j.io) and note its `neo4j+s://...` URI,
