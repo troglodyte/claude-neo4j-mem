@@ -21,6 +21,9 @@ FAILURES=0
 
 pass() { echo "[OK]   $1"; }
 fail() { echo "[FAIL] $1"; FAILURES=$((FAILURES + 1)); }
+# Deliberately does not count toward FAILURES: used where this script can see
+# that something is *unverified*, not that it is broken.
+warn() { echo "[WARN] $1"; }
 
 # 1. Container present and healthy, under whichever engine resolved
 if ! resolve_engine; then
@@ -36,14 +39,30 @@ else
   fi
 fi
 
-# 1b. Rootless Podman needs a systemd user unit to survive a reboot.
-if [ "${ENGINE:-}" = "podman" ] && [ "$(uname -s)" = "Linux" ]; then
-  if systemctl --user is-enabled claude-neo4j.service >/dev/null 2>&1; then
-    pass "boot persistence: systemd user unit enabled"
-  else
-    fail "boot persistence: no systemd user unit — this container will not survive a reboot (run scripts/setup-local.sh to install one)"
-  fi
-fi
+# 1b. Podman is daemonless, so something has to bring the container back after
+# a reboot — a systemd user unit on Linux, a login agent (or Podman Desktop's
+# equivalent setting) on macOS. lib-engine.sh owns that mapping; this reports
+# it. A kind with no mechanism, Docker included, returns 2 and is skipped.
+PERSIST_STATE=0
+boot_persistence_installed || PERSIST_STATE=$?
+case "$(boot_persistence_kind)" in
+  systemd)
+    if [ "$PERSIST_STATE" -eq 0 ]; then
+      pass "boot persistence: systemd user unit enabled"
+    else
+      fail "boot persistence: no systemd user unit — this container will not survive a reboot ($(boot_persistence_hint))"
+    fi ;;
+  launchagent)
+    if [ "$PERSIST_STATE" -eq 0 ]; then
+      pass "boot persistence: login agent $LAUNCH_AGENT_LABEL loaded"
+    else
+      # A warning, not a failure: Podman Desktop's own "Start Podman on login"
+      # does the same job and leaves nothing this script can detect, so the
+      # absence of our agent means "unknown", not "broken". Calling it a FAIL
+      # would fail the whole run on a machine that is in fact fine.
+      warn "boot persistence: no login agent installed — fine if Podman Desktop's 'Start Podman on login' is on; otherwise run 'podman machine start' after a reboot, or scripts/setup-local.sh to install one"
+    fi ;;
+esac
 
 # 2. Plugin config file present and loadable
 CONFIG_CHECK="$(node -e "

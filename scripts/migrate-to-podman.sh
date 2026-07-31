@@ -47,14 +47,19 @@ IMAGE="docker.io/library/neo4j:5-community"
 die() { echo "$PROG: $*" >&2; exit 1; }
 
 command -v podman >/dev/null 2>&1 || die "podman is not installed (run scripts/setup-local.sh)"
-podman info >/dev/null 2>&1 || die "podman is installed but not usable"
+# The hint matters most on macOS: a reboot leaves podman-machine-default
+# stopped, `podman info` fails, and this is the first thing a user hits when
+# they (reasonably) re-run the migration to get memory back. Without it the
+# message is a dead end where the actual fix is one command.
+podman info >/dev/null 2>&1 || die "podman is installed but not usable.$(engine_hint podman)"
 docker inspect "$CONTAINER" >/dev/null 2>&1 || die "no Docker container $CONTAINER to migrate from"
 
 # CRITICAL: a second run must never load a stale dump over an already-
 # migrated volume. The post-migration steady state is: the Podman container
 # exists, the Docker container is deliberately kept but stopped, and Docker's
-# volume still holds the PRE-migration graph. Rootless Podman does not survive
-# a reboot without the systemd unit scripts/setup-local.sh installs, so after
+# volume still holds the PRE-migration graph. Podman does not survive a reboot
+# without the mechanism scripts/setup-local.sh installs (a systemd user unit
+# on Linux, a login agent running `podman machine start` on macOS), so after
 # a reboot memory is offline and re-running this script is the obvious user
 # response - and without this guard, that re-run would fingerprint the stale
 # Docker graph, dump it, and load it over claude_neo4j_data with
@@ -215,18 +220,40 @@ fi
 CUTOVER_HEALTHY=1
 trap - EXIT INT TERM
 
-cat <<EOF
-
-Migration complete. Podman now serves the graph on 7687.
-
-  Persist across reboots: scripts/setup-local.sh
+# The persistence advice is platform-specific, and printing the Linux one on a
+# Mac was worse than printing nothing: setup-local.sh's systemd path returns
+# early on Darwin, so "run it to persist across reboots" pointed at a step that
+# installs nothing there and left the real answer -- `podman machine start` --
+# unsaid. ENGINE is pinned to podman at the top of this script, so
+# boot_persistence_kind here is deciding purely on the platform.
+case "$(boot_persistence_kind)" in
+  launchagent)
+    PERSIST_BLOCK="  Persist across logins: scripts/setup-local.sh
+            On macOS the container lives inside the podman-machine-default
+            VM, which does not come back on its own - so --restart never gets
+            to fire. setup-local.sh offers a login agent that runs
+            'podman machine start' (Podman Desktop's 'Start Podman on login'
+            does the same job). Safe to run now: it skips container creation
+            since $CONTAINER already exists.
+            If memory is offline after a reboot, the fix is
+            'podman machine start' - NOT another run of this script, which
+            the guard at the top refuses anyway." ;;
+  *)
+    PERSIST_BLOCK="  Persist across reboots: scripts/setup-local.sh
             Rootless Podman does NOT survive a reboot without the systemd
             unit this installs. Safe to run now: it skips container creation
             since $CONTAINER already exists. Skipping this step is the most
             likely way to end up wanting to re-run this script after a
             reboot - which the guard above now refuses to do silently, but
             it is simpler to just persist the container correctly the first
-            time.
+            time." ;;
+esac
+
+cat <<EOF
+
+Migration complete. Podman now serves the graph on 7687.
+
+$PERSIST_BLOCK
   Verify:   scripts/check-health.sh
   Rollback: podman stop $CONTAINER && podman rm $CONTAINER && docker start $CONTAINER
             That is the whole rollback - no environment variable to set or

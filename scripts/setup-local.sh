@@ -84,11 +84,46 @@ EOF
   return 0
 }
 
+# A stopped `podman machine` is by far the commonest macOS failure here, and
+# it is not a missing engine: podman is installed and on PATH, `podman info`
+# just fails while the VM is down -- which is exactly the state a reboot
+# leaves behind. Without this branch the script announced "No container engine
+# found" and offered to brew-install a podman that was already there, at the
+# precise moment the real answer was one command. Returns 0 if the engine is
+# usable afterwards, 1 to fall through to the install offer.
+offer_machine_start() {
+  [ "$(uname -s)" = "Darwin" ] || return 1
+  command -v podman >/dev/null 2>&1 || return 1
+
+  echo "Podman is installed, but its VM is not running — macOS runs the"
+  echo "container inside podman-machine-default, and a reboot leaves it down."
+  echo
+  echo "    podman machine start"
+  echo
+
+  if [ ! -t 0 ]; then
+    echo "Not running interactively — run the command above, then re-run this script." >&2
+    return 1
+  fi
+
+  local reply=""
+  read -r -p "Start it now? [Y/n] " reply || reply=""
+  case "$reply" in
+    [nN]|[nN][oO]) echo "Skipped. Run the command above, then re-run this script." >&2; return 1 ;;
+  esac
+
+  echo "Starting the Podman VM (a first-ever init can take a few minutes)..."
+  podman machine init 2>/dev/null || true    # already-initialised is not an error
+  podman machine start 2>/dev/null || true
+  resolve_engine || return 1
+  return 0
+}
+
 # shellcheck source=scripts/lib-engine.sh
 . "$REPO_ROOT/scripts/lib-engine.sh"
 
 if ! resolve_engine; then
-  offer_engine_install || exit 1
+  offer_machine_start || offer_engine_install || exit 1
 fi
 echo "Using container engine: $ENGINE"
 
@@ -195,15 +230,126 @@ if [ "$status" != "healthy" ]; then
   exit 1
 fi
 
-# Rootless Podman is daemonless: --restart only holds while the user's Podman
-# session lives, so a reboot leaves the container down and the next Claude
-# session memory-less. A systemd *user* unit plus lingering is Podman's answer.
+# Podman is daemonless, so nothing brings this container back on its own after
+# a reboot and the next Claude session is silently memory-less. The mechanism
+# differs by platform and lib-engine.sh owns that mapping; this only asks, and
+# then installs whichever one applies. Docker needs none of it.
 offer_boot_persistence() {
-  [ "$ENGINE" = "podman" ] || return 0                 # Docker's daemon already does this
-  [ "$(uname -s)" = "Linux" ] || return 0              # macOS: podman machine handles it
-  command -v systemctl >/dev/null 2>&1 || return 0
-  systemctl --user is-enabled claude-neo4j.service >/dev/null 2>&1 && return 0
+  local kind state=0
+  kind="$(boot_persistence_kind)"
+  # 2 means "nothing to install here" (Docker, or a platform with no
+  # mechanism) and 0 means it is already in place -- neither is worth a
+  # prompt. `|| state=$?` keeps the non-zero returns from tripping set -e.
+  boot_persistence_installed || state=$?
+  [ "$state" -eq 1 ] || return 0
 
+  case "$kind" in
+    systemd)     offer_systemd_unit ;;
+    launchagent) offer_launch_agent ;;
+  esac
+}
+
+# macOS has neither a user systemd session nor lingering. The equivalent lever
+# is a LaunchAgent, with one honest difference that is stated rather than
+# glossed: it runs at *login*, not at boot -- macOS has no user-level
+# pre-login start, so this is the closest parity available.
+offer_launch_agent() {
+  cat <<'EOF'
+
+This container runs inside the podman-machine-default VM, and that VM does not
+come back by itself after a reboot — so the container's --restart policy never
+gets the chance to fire, and the next Claude session starts memory-less. macOS
+has no systemd user unit or lingering; the equivalent is a login agent running:
+
+    podman machine start
+
+Note "at login", not at boot: macOS has no user-level pre-login start. If you
+use Podman Desktop, its "Start Podman on login" setting does the same job —
+skip this if that is already on.
+
+EOF
+  if [ ! -t 0 ]; then
+    echo "Not interactive — skipping. Re-run this script to be asked again." >&2
+    return 0
+  fi
+
+  local reply=""
+  read -r -p "Install the login agent now? [y/N] " reply || reply=""
+  case "$reply" in
+    [yY]|[yY][eE][sS]) ;;
+    *) echo "Skipped. If memory is offline after a reboot, run: podman machine start"; return 0 ;;
+  esac
+
+  # As with the systemd path below, this is opt-in convenience and is never
+  # allowed to abort the mandatory configure step, so every fallible command
+  # returns 0 with an explanation rather than failing under set -e.
+  local podman_bin=""
+  # LaunchAgents inherit a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin) that
+  # excludes both Homebrew prefixes, so a bare "podman" in the plist would
+  # simply never run — and would fail at login, where nobody is watching.
+  # Resolve the absolute path now, at install time.
+  podman_bin="$(command -v podman)" || {
+    echo "Boot-persistence setup failed: could not locate the podman binary. Safe to skip -- re-run scripts/setup-local.sh to retry." >&2
+    return 0
+  }
+
+  if ! mkdir -p "$HOME/Library/LaunchAgents" "$HOME/.claude-neo4j"; then
+    echo "Boot-persistence setup failed: could not create ~/Library/LaunchAgents. Safe to skip -- re-run scripts/setup-local.sh to retry." >&2
+    return 0
+  fi
+
+  # No KeepAlive, deliberately: `podman machine start` is one-shot and exits,
+  # so KeepAlive would have launchd respawn it in a tight loop forever. It
+  # also exits non-zero when the VM is already running, which is a normal
+  # no-op and the reason the log below is worth having.
+  if ! cat > "$LAUNCH_AGENT_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$LAUNCH_AGENT_LABEL</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$podman_bin</string>
+        <string>machine</string>
+        <string>start</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>$HOME/.claude-neo4j/podman-machine-start.log</string>
+    <key>StandardErrorPath</key>
+    <string>$HOME/.claude-neo4j/podman-machine-start.log</string>
+</dict>
+</plist>
+EOF
+  then
+    rm -f "$LAUNCH_AGENT_PLIST"
+    echo "Boot-persistence setup failed: could not write $LAUNCH_AGENT_PLIST. Safe to skip -- re-run scripts/setup-local.sh to retry." >&2
+    return 0
+  fi
+
+  # `bootstrap` is the modern verb and `load -w` the deprecated one that still
+  # works everywhere this repo runs. bootstrap also fails if the label is
+  # already loaded, and re-running this script has to stay safe, so fall back
+  # rather than treating its failure as fatal.
+  local domain="gui/$(id -u)"
+  if ! launchctl bootstrap "$domain" "$LAUNCH_AGENT_PLIST" 2>/dev/null; then
+    if ! launchctl load -w "$LAUNCH_AGENT_PLIST" 2>/dev/null; then
+      echo "Boot-persistence setup failed: launchctl would not load $LAUNCH_AGENT_PLIST. Safe to skip -- re-run scripts/setup-local.sh to retry." >&2
+      return 0
+    fi
+  fi
+
+  echo "Installed. 'podman machine start' will now run at login."
+  echo "  log:    $HOME/.claude-neo4j/podman-machine-start.log"
+  echo "  remove: launchctl bootout $domain/$LAUNCH_AGENT_LABEL && rm $LAUNCH_AGENT_PLIST"
+}
+
+# Rootless Podman on Linux: --restart only holds while the user's Podman
+# session lives, so a systemd *user* unit plus lingering is Podman's answer.
+offer_systemd_unit() {
   cat <<'EOF'
 
 Rootless Podman has no daemon, so this container will NOT come back after a

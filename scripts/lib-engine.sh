@@ -96,6 +96,77 @@ engine_hint() {
   esac
 }
 
+# --- Boot persistence -------------------------------------------------------
+# What brings claude-neo4j-memory back after a reboot depends on the platform
+# AND the engine, and getting it wrong costs a silently memory-less session
+# rather than an error. Three scripts have to say something about it --
+# setup-local.sh offers to install it, check-health.sh reports it,
+# migrate-to-podman.sh points at it -- and each used to restate the Linux
+# answer, so all three gave macOS users advice that could not work: the
+# systemd path returns early on Darwin, and "run setup-local.sh to persist
+# across reboots" therefore installed nothing at all there. The mapping is
+# stated once here and read by all three.
+#
+#   docker       the daemon's own restart policy already handles it
+#   systemd      rootless Podman on Linux: daemonless, so a systemd *user*
+#                unit plus lingering is the mechanism
+#   launchagent  Podman on macOS: the container runs inside the
+#                podman-machine-default VM, and that VM does not start
+#                itself. `--restart unless-stopped` only gets a chance to
+#                fire once it is up, so what needs to run at login is
+#                `podman machine start` -- not anything about the container.
+#   none         no known mechanism (unset engine, or another OS)
+LAUNCH_AGENT_LABEL="com.claude-neo4j.podman-machine"
+LAUNCH_AGENT_PLIST="${HOME:-}/Library/LaunchAgents/$LAUNCH_AGENT_LABEL.plist"
+
+boot_persistence_kind() {
+  case "${ENGINE:-}" in
+    podman) ;;
+    docker) printf docker; return 0 ;;
+    *)      printf none;   return 0 ;;
+  esac
+  case "$(uname -s)" in
+    Linux)  printf systemd ;;
+    Darwin) printf launchagent ;;
+    *)      printf none ;;
+  esac
+}
+
+# 0 = the mechanism is in place, 1 = it is not, 2 = there is nothing to
+# install on this platform. Callers must distinguish 1 from 2: only 1 is a
+# problem, and treating 2 as "missing" is how a Docker host would get nagged
+# about a systemd unit it has no use for.
+boot_persistence_installed() {
+  case "$(boot_persistence_kind)" in
+    systemd)
+      command -v systemctl >/dev/null 2>&1 || return 2
+      systemctl --user is-enabled claude-neo4j.service >/dev/null 2>&1 ;;
+    launchagent)
+      # The plist existing on disk says nothing about whether it is loaded --
+      # a `launchctl bootout` leaves the file behind. launchctl is the
+      # authority, so the file check is only a cheap early out.
+      [ -f "$LAUNCH_AGENT_PLIST" ] || return 1
+      launchctl print "gui/$(id -u)/$LAUNCH_AGENT_LABEL" >/dev/null 2>&1 ;;
+    *) return 2 ;;
+  esac
+}
+
+# One line, for a caller that needs to point at the mechanism without
+# explaining it (check-health.sh's result text, migrate-to-podman.sh's
+# closing block).
+boot_persistence_hint() {
+  case "$(boot_persistence_kind)" in
+    docker)
+      printf "Docker's daemon restarts the container itself; nothing to install." ;;
+    systemd)
+      printf "Rootless Podman is daemonless: run scripts/setup-local.sh to install a systemd user unit." ;;
+    launchagent)
+      printf "macOS runs the container inside the podman-machine-default VM, which does not start itself: run scripts/setup-local.sh for a login agent, or turn on Podman Desktop's \"Start Podman on login\". After a reboot without either, the fix is 'podman machine start'." ;;
+    *)
+      printf "No boot-persistence mechanism is known for this platform; start the container by hand after a reboot." ;;
+  esac
+}
+
 # Podman and Docker have disagreed about where healthcheck state lives
 # (.State.Health vs .State.Healthcheck) across versions. A template that
 # doesn't match either engine's actual state shape is an ERROR (non-zero exit)

@@ -277,6 +277,32 @@ normal. Several ran that way before it was noticed.
   report the unit is absent — it has no way to tell "declined" apart from
   "never offered" or "install failed". This is the one behavioural regression
   against Docker.
+- **Boot persistence is platform-shaped, and the mapping lives in one place.**
+  `boot_persistence_kind`/`_installed`/`_hint` in `lib-engine.sh` return
+  `docker` | `systemd` | `launchagent` | `none`; `setup-local.sh`,
+  `check-health.sh` and `migrate-to-podman.sh` all read it rather than each
+  restating a rule. They used to each restate the **Linux** rule, which is how
+  every one of them ended up telling macOS users to run `setup-local.sh` for
+  reboot survival when its systemd path returns early on Darwin and installs
+  nothing. `_installed` returns **2 for "nothing to install"**, distinct from
+  1 for "missing" — collapsing them nags Docker hosts about a systemd unit.
+- **On macOS the VM is the thing that doesn't come back, not the container.**
+  Podman runs it inside `podman-machine-default`, so `--restart unless-stopped`
+  never gets to fire until the VM is up and the fix after a reboot is always
+  `podman machine start` — never a re-run of `migrate-to-podman.sh` (refused by
+  the already-migrated guard) and never a re-`setup-local.sh` on its own. The
+  optional LaunchAgent runs at **login**, not boot: macOS has no user-level
+  pre-login start and no lingering equivalent, so this is not full parity with
+  systemd and the prompt says so. It also can't be detected by absence —
+  Podman Desktop's *Start Podman on login* does the same job invisibly, which
+  is why `check-health.sh` **warns** there instead of failing.
+- **A stopped `podman machine` reads as "no engine installed" unless checked
+  for.** `podman info` fails while the VM is down — the exact post-reboot
+  state — so `resolve_engine` fails and `setup-local.sh` used to announce "No
+  container engine found" and offer to `brew install` an already-present
+  podman. Both it and `migrate-to-podman.sh` now distinguish
+  installed-but-unusable and point at `podman machine start`
+  (`engine_hint podman`).
 
 ## Marketplace snapshots drift from the working tree
 

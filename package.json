@@ -1,11 +1,11 @@
 {
   "name": "claude-neo4j-memory",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Persistent, graph-based memory for Claude Code backed by Neo4j (local Podman/Docker or remote/Aura).",
   "type": "module",
   "private": true,
   "scripts": {
-    "test": "bash tests/launcher-path.test.sh && bash tests/engine-resolve.test.sh && bash tests/image-name.test.sh && node --test tests/**/*.test.js",
+    "test": "bash tests/launcher-path.test.sh && bash tests/engine-resolve.test.sh && bash tests/image-name.test.sh && bash tests/boot-persistence.test.sh && node --test tests/**/*.test.js",
     "configure": "node scripts/configure.mjs",
     "mcp-server": "node src/mcp/server.js",
     "memory": "node scripts/memory-cli.mjs",

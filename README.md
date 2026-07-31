@@ -143,6 +143,40 @@ nothing else copies data between engines.
 [console.neo4j.io](https://console.neo4j.io) and note its `neo4j+s://...` URI,
 username, and password. No local container needed.
 
+### Surviving a reboot
+
+Nothing errors when the container is down — the session just starts with no
+memory — so this is worth setting up once. What does the job depends on both
+the engine and the platform, and `setup-local.sh` offers whichever applies:
+
+| | mechanism | if memory is offline after a reboot |
+| --- | --- | --- |
+| **Docker** | the daemon's own restart policy | `docker start claude-neo4j-memory` |
+| **Podman on Linux** | a systemd **user** unit plus `loginctl enable-linger` | `systemctl --user start claude-neo4j.service` |
+| **Podman on macOS** | a **login agent** running `podman machine start` | `podman machine start` |
+
+Rootless Podman has no daemon, so `--restart unless-stopped` only holds while
+your Podman session lives — that's what the systemd unit replaces on Linux.
+
+On macOS the container runs inside the `podman-machine-default` VM, and that
+VM does not come back on its own, so the restart policy never gets the chance
+to fire. `setup-local.sh` offers a LaunchAgent
+(`~/Library/LaunchAgents/com.claude-neo4j.podman-machine.plist`) that runs
+`podman machine start` — at **login**, not at boot, since macOS has no
+user-level pre-login start and no equivalent of lingering. Podman Desktop's
+*Start Podman on login* setting does the same job; skip the agent if that's
+already on. Remove the agent with:
+
+```bash
+launchctl bootout gui/$(id -u)/com.claude-neo4j.podman-machine
+rm ~/Library/LaunchAgents/com.claude-neo4j.podman-machine.plist
+```
+
+`scripts/check-health.sh` reports the state of whichever mechanism applies. On
+macOS a missing agent is a warning rather than a failure: Podman Desktop's
+setting leaves no trace the script can detect, so its absence means *unknown*,
+not *broken*.
+
 ### 3. Configure the plugin
 
 Run this yourself in a terminal (not via Claude — it collects a password):

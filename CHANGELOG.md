@@ -6,6 +6,38 @@ Version numbers track `.claude-plugin/plugin.json` and `package.json`, which are
 kept in step deliberately: `claude plugin update` compares that string, so a
 release that doesn't move it never reaches any other project.
 
+## 0.4.2 — 2026-07-31
+
+- **Fixed** boot-persistence advice that could not work on macOS. Three scripts
+  restated the Linux answer, and `setup-local.sh`'s systemd path returns early
+  on Darwin — so "run `scripts/setup-local.sh` to persist across reboots"
+  (printed by `migrate-to-podman.sh`, and implied by `check-health.sh`)
+  installed nothing at all there, while the real answer went unsaid: on macOS
+  the container lives inside the `podman-machine-default` VM, which does not
+  come back by itself, so `--restart unless-stopped` never gets to fire. The
+  mapping now lives once in `scripts/lib-engine.sh`
+  (`boot_persistence_kind`/`_installed`/`_hint`) and all three scripts read it.
+- **Added** an optional macOS login agent, offered by `setup-local.sh` the way
+  the systemd unit is on Linux: `~/Library/LaunchAgents/`
+  `com.claude-neo4j.podman-machine.plist`, running `podman machine start` at
+  login. At *login*, not at boot — macOS has no user-level pre-login start and
+  no equivalent of `loginctl enable-linger`, and the prompt says so rather than
+  implying parity. It names Podman Desktop's *Start Podman on login* as the
+  no-install alternative, and prints its own uninstall command.
+- **Changed** `check-health.sh` to report macOS boot persistence as a **warning**
+  rather than a failure when no agent is installed. Podman Desktop's setting
+  does the same job and leaves nothing the script can detect, so its absence
+  means *unknown*, not *broken*, and failing the whole run on it would be a
+  false alarm. Linux stays a hard failure, where absence really is conclusive.
+- **Fixed** two macOS dead ends around a stopped VM, which is the state a reboot
+  leaves behind. `setup-local.sh` announced "No container engine found" and
+  offered to `brew install podman` over an already-installed podman; it now
+  recognises installed-but-VM-down and offers `podman machine start` instead.
+  `migrate-to-podman.sh` died with a bare "podman is installed but not usable"
+  at exactly the point a user re-runs the migration to get memory back — it now
+  carries the same hint. (Re-running the migration is still refused, correctly:
+  the fix is starting the VM.)
+
 ## 0.4.1 — 2026-07-31
 
 - **Fixed** Podman support failing outright on a stock Debian/Ubuntu host. The
