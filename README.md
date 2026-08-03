@@ -265,6 +265,12 @@ disk, so a capture that failed days ago still works when it finally runs.
   entities hoarding 100+ observations, empty stubs, subsystem maps too
   fragmented to inject cheaply). `--quiet` for just the table.
 - `npm run token-cost [-- --all]` — see [Token cost](#token-cost).
+- `npm run telemetry [-- --days N]` — how the memory is *used*, as opposed to
+  what it holds: read/write counts and their ratio per project, characters
+  served, the share of lookups that missed, and the individual searches that
+  found nothing. `--json` for the raw summary, `--days N` to window it.
+  Reads `~/.claude-neo4j/telemetry.jsonl`, written by the MCP tools
+  themselves; opt out with `CLAUDE_NEO4J_DISABLE_TELEMETRY=1`.
 - `npm run backfill-subsystems` — tags observations predating subsystem
   tagging. Idempotent and resumable (selects `subsystem IS NULL`, writes per
   batch), and processes entities largest-first per project so the vocabulary

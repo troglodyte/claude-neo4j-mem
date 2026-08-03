@@ -102,9 +102,12 @@ async function main() {
     }
     case "search": {
       if (args.length === 0) usage();
-      const results = await graph.searchMemory(args.join(" "), limit ?? 10, project);
+      const { results, note } = await graph.searchMemory(args.join(" "), limit ?? 10, project);
       if (results.length === 0) console.log("No matches.");
       results.forEach(printEntity);
+      // Surfaced here too: a terminal user reading five plausible rows has the
+      // same problem the model does, and no score to calibrate against.
+      if (note && results.length) console.log(`\n⚠ ${note}`);
       break;
     }
     case "recent": {

@@ -3,6 +3,7 @@ import { withSession, int } from "./neo4jClient.js";
 import { resolveCanonicalName } from "./dedup.js";
 import { resolveSubsystem, UNTAGGED } from "./subsystem.js";
 import { BUDGETS, truncateText, fitToBudget } from "./budget.js";
+import { classifyRelevance, topScore, describeRelevance } from "./relevance.js";
 
 // Callers search with plain phrases and with entity names, and this plugin's
 // naming convention puts Lucene syntax characters right in those names
@@ -236,7 +237,18 @@ export async function searchMemory(query, limit = 10, project = null, { subsyste
       const row = r.toObject();
       return { ...row, observations: row.observations.map((t) => truncateText(t, BUDGETS.searchTextChars)) };
     });
-    return fitToBudget(rows, BUDGETS.searchTotalChars).kept;
+    const kept = fitToBudget(rows, BUDGETS.searchTotalChars).kept;
+
+    // The score was always in the payload, but uncalibrated: nothing said that
+    // 1.6 is a fragment match on this index while 4.8 is a real one, so a miss
+    // read exactly like a hit. Classifying it in-band is what lets a caller
+    // answer "memory doesn't have that" instead of summarizing noise.
+    const relevance = classifyRelevance(kept);
+    const score = topScore(kept);
+    const envelope = { results: kept, relevance, topScore: score };
+    const note = describeRelevance(relevance, score);
+    if (note) envelope.note = note;
+    return envelope;
   });
 }
 

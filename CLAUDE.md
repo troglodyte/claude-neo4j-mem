@@ -90,6 +90,10 @@ normal. Several ran that way before it was noticed.
   `--quiet` for table only.
 - `npm run token-cost [-- --all]` — measures every read path against a
   per-call ceiling and exits non-zero on regression.
+- `npm run telemetry [-- --days N]` — access patterns from
+  `~/.claude-neo4j/telemetry.jsonl`: read/write ratio per project, chars
+  served, miss rate (empty *and* weak-match, see below), and the searches that
+  found nothing. `--json` for raw, `--file PATH` to read another log.
 - `npm run backup` / `npm run restore -- --latest` — snapshot and reinstate the
   whole database via `neo4j-admin database dump`/`load`, run in a sibling
   container against the stopped container's volume (`--volumes-from`). Local
@@ -135,6 +139,28 @@ normal. Several ran that way before it was noticed.
   `{total, returned, truncated}`) so a caller never summarizes a silently
   shortened history. **Run `npm run token-cost` after changing anything that
   shapes a read payload.**
+- **A search "hit" is not evidence the search worked.** The full-text index
+  tokenizes on hyphens, so `zzz-nonexistent-term-qqq` matches the token `term`
+  and returns a real, plausible-looking entity — a total miss that reports as
+  one hit. Counting rows therefore flatters recall, and any metric built on
+  "did it return anything" will read healthier than the graph is. Measured on
+  this repo: genuine queries top out at 3.3–9.3, that fragment match scored
+  1.61, and true misses return 0 rows — so the Lucene score separates them
+  where the count can't. `WEAK_SCORE` in `src/lib/relevance.js` is that floor
+  (2.0) and it is **calibrated against this graph's content**; re-measure it
+  with a handful of known-good and known-junk queries before trusting it
+  elsewhere. Note the score was *always* in the payload and that wasn't
+  enough — a bare number means nothing to a reader with no sense of the
+  index's range, which is why `searchMemory` now returns a `relevance` verdict
+  and a `note` rather than expecting the caller to judge. **A raw metric a
+  caller can't calibrate is not an answer.**
+- **Read-side usage is measured in `~/.claude-neo4j/telemetry.jsonl`, not in
+  the graph.** Deliberately: access patterns are a different question from
+  contents, they'd distort the `usage` hygiene report, and keeping them out of
+  Neo4j means the log can be written when the database is the thing that's
+  broken. Written by `registerTool` in `src/mcp/server.js`, which is the only
+  seam every tool passes through — add a tool via `server.tool` directly and it
+  becomes invisible to `npm run telemetry` with nothing to warn you.
 - **Subsystem tags live on the observation, not the entity.** The entities
   most in need of slicing are exactly the ones already spanning several
   subsystems — `plugin:neo4j-memory` alone covers auto-capture, search,
@@ -196,6 +222,17 @@ normal. Several ran that way before it was noticed.
   oldest content first. Pending inputs are `*.pending.json`; the sweep still
   accepts the older `*.sessionend.json` name, since a file written by an
   earlier version is still retryable.
+- **The dominant capture failure is the container going away at night, not
+  the timeout mystery.** Measured 2026-08-03 over `capture.log`'s first 355
+  lines: 149 successes, 26 failures — and 18 of the 26 are `Connection was
+  closed by server` / `ECONNREFUSED 127.0.0.1:7687`, clustered at 00–03 UTC
+  (13 of them at 02:xx alone), which is 19:00–22:00 local. That is the machine
+  shutting down while a detached `SessionEnd` worker is still connecting.
+  Every one recovered on the next boot's sweep — on 2026-08-03 the unit came
+  up at 11:06 UTC and the retry landed at 11:07 — so **the retry queue, not
+  the timeout headroom, is what keeps the capture rate up**; effective loss
+  after retry is ~3/149 (~2%). Don't read a cluster of connection failures as
+  a capture bug: check whether the sweep already closed them.
 - **A capture timeout carries the killed child's output** (`extract.js`).
   It used to reject with the duration alone, discarding the stdout/stderr
   collected right up to the `SIGKILL` — which made every timeout in the log

@@ -64,10 +64,10 @@ test("getSubsystemMap aggregates counts and buckets untagged observations", asyn
 
 test("searchMemory can be narrowed to one subsystem", async () => {
   const all = await graph.searchMemory("fact", 10, PROJECT);
-  assert.ok(all.length >= 1, "sanity: the unfiltered search finds the test entity");
+  assert.ok(all.results.length >= 1, "sanity: the unfiltered search finds the test entity");
 
   const captureOnly = await graph.searchMemory("fact", 10, PROJECT, { subsystem: "capture" });
-  const texts = captureOnly.flatMap((r) => r.observations);
+  const texts = captureOnly.results.flatMap((r) => r.observations);
   assert.ok(texts.length > 0, "filtered search still returns the matching observations");
   assert.ok(!texts.some((t) => t.includes("sha256")), "a backup observation must not leak through");
 });

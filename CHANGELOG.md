@@ -6,6 +6,50 @@ Version numbers track `.claude-plugin/plugin.json` and `package.json`, which are
 kept in step deliberately: `claude plugin update` compares that string, so a
 release that doesn't move it never reaches any other project.
 
+## 0.5.0 — 2026-08-03
+
+- **Fixed** `memory_search` presenting a fragment match as an answer. The
+  full-text index tokenizes on punctuation, so `zzz-nonexistent-term-qqq`
+  matched the token `term`, returned one real entity, and read exactly like a
+  hit — the "wrong-but-plausible search result" this project recorded a lesson
+  about on 2026-07-21, still live. The score was already in the payload but
+  uncalibrated: nothing said that 1.61 is noise on this index while 4.80 is a
+  real match. `searchMemory` now returns `{results, relevance, topScore}` with
+  `relevance` of `strong`/`weak`/`none`, plus an in-band `note` on the two bad
+  cases telling the caller to say memory doesn't have this rather than
+  summarizing the rows. `npm run memory -- search` prints the same warning,
+  since a terminal reader has the same problem and no score to judge by. The
+  calibration lives once in `src/lib/relevance.js` (`WEAK_SCORE`, measured
+  against this corpus) and is shared with the telemetry miss metric so the two
+  can't drift. **Breaking**: `searchMemory` returned a bare array before.
+- **Added** read-side telemetry and `npm run telemetry`. The write side has
+  always been measurable — `npm run usage` counts what landed, `npm run
+  token-cost` prices what a read would cost — but nothing recorded whether the
+  memory was ever *consulted*, so "it captures well" could never be turned into
+  "it helps". Every MCP tool call now appends one JSONL line to
+  `~/.claude-neo4j/telemetry.jsonl` (tool, read/write, project, result size,
+  hit count, duration, and the query text on lookups), and the report turns
+  that into read:write ratio per project, characters served, miss rate, and the
+  searches that came back empty. Writes are logged too, not just reads: a
+  project that only ever writes is memory being filed and never read back,
+  which is the failure mode the graph's own counts cannot show. Best-effort
+  throughout — a telemetry failure can never fail a tool — opt out with
+  `CLAUDE_NEO4J_DISABLE_TELEMETRY=1`, and the log rotates once at 5 MB.
+- **Added** a relevance floor to the miss metric, because hit count alone
+  undercounts misses. The full-text index tokenizes on hyphens, so a junk query
+  like `zzz-nonexistent-term-qqq` matches the token `term` and returns one
+  plausible-looking entity — a miss that reports as a hit. Entries now carry
+  the top Lucene score; measured on this repo real queries score 3.3–9.3 while
+  that fragment match scored 1.61, so results below 2.0 are counted as weak and
+  reported separately from empty ones. The two have different fixes: nothing
+  recorded, versus recorded under words nobody searches for.
+- **Changed** `src/mcp/server.js` to register tools through one wrapper. All
+  eleven repeated the same try/catch/serialize block, which made the response
+  envelope eleven separate decisions; folding it into `registerTool` also gives
+  telemetry a single chokepoint, so a tool added later is measured because it
+  registered rather than because someone remembered to log it. Net 35 lines
+  shorter despite gaining the telemetry.
+
 ## 0.4.2 — 2026-07-31
 
 - **Fixed** boot-persistence advice that could not work on macOS. Three scripts
