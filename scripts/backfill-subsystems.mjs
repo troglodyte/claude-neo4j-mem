@@ -162,10 +162,20 @@ async function main() {
 
   for (const entity of entities) {
     if (!vocabularies.has(entity.project)) {
-      vocabularies.set(
-        entity.project,
-        filterVocabulary((await listSubsystems(entity.project)).map((s) => s.subsystem))
-      );
+      // The tag being retagged is withheld from the vocabulary: it is still in
+      // the graph while the run is in progress, and offering it back under
+      // "prefer one of these" is how a retag becomes a no-op. That the run is
+      // happening at all is the statement that this tag is the wrong answer.
+      //
+      // This was only ever true by accident before. filterVocabulary strips
+      // catch-alls, so `--retag general` was safe because "general" is on that
+      // list - and every other retag re-offered its own target. The tag that
+      // prompted this one, `context-watch`, is a plausible domain word, so
+      // nothing withheld it. resolveSubsystem below snaps onto the vocabulary
+      // too, so leaving it in would recapture near-misses as well as repeats.
+      const known = (await listSubsystems(entity.project)).map((s) => s.subsystem);
+      const retagSlug = retag ? resolveSubsystem(retag, []) : null;
+      vocabularies.set(entity.project, filterVocabulary(known).filter((s) => s !== retagSlug));
     }
     const vocabulary = vocabularies.get(entity.project);
 

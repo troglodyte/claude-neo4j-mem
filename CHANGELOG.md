@@ -47,6 +47,16 @@ release that doesn't move it never reaches any other project.
   comments say so rather than letting the numbers read as principled. The third
   needs no threshold: a tag repeating the project name partitions nothing at any
   share, which is exactly what the first two miss. Found live on two projects.
+- **Fixed** `npm run backfill-subsystems --retag TAG` handing back the tag it was
+  retagging. The prompt vocabulary is seeded from the project's existing tags
+  under "prefer one of these", and the target is still in the graph while the run
+  is in progress — so the remedy for a junk drawer re-offered it as the preferred
+  answer. This only ever worked by accident: `filterVocabulary` strips catch-alls,
+  so `--retag general` was safe because `general` is on that list, while every
+  other retag was self-defeating. The target is now withheld for the run, which
+  is what the flag already meant. Measured on a live tag named after its own
+  project: with it withheld, all 24 observations reclassified into five real
+  subsystems and none returned to the original.
 - **Added** discoverability for the retag tooling, which existed only as a flag
   in a maintenance script. `npm run backfill-subsystems --retag TAG` is now named
   in the `memory-status` skill and in the `memory_add_observations` description,
