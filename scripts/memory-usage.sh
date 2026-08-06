@@ -181,6 +181,107 @@ ${JUNK}
 "
 fi
 
+# Concentration, the mirror image of the fragmentation check above - and equally
+# invisible to it. A project whose tags have collapsed into one bucket has a
+# *small* map: five tags render well under 800 chars while telling the reader
+# almost nothing. The reported case was 133 of 202 tagged observations under
+# "infrastructure" in an OAuth authorization server whose `oauth` tag held 8.
+#
+# The catch-all check can't see this either: it matches tag names that admit to
+# being junk drawers, and "infrastructure" is a plausible domain word. It then
+# compounds, because both extraction prompts seed their vocabulary from
+# listSubsystems with "prefer one of these" - the biggest tag is offered first
+# to every later batch. A junk drawer named after the domain is invisible to
+# every rule that looks at names.
+#
+# Calibrated against the nine projects in this database, which is enough to see
+# the band but not enough to call it universal: projects reading as healthy span
+# 16-36%, the one flagged here sits at 44%, and the reported case was 66%. So 40
+# clears every healthy project by only four points - re-measure before trusting
+# it on a graph whose projects are shaped differently, and expect the first
+# false positive to be a project legitimately dominated by one subsystem.
+#
+# The 40-observation floor is load-bearing, not a rounding guard: without it the
+# three smallest projects here (12-22 observations) trip at 33-55% purely on
+# sample size - five observations in one bucket out of nine tagged.
+DOMINANT="$(run_query "
+MATCH (o:Observation)-[:ABOUT]->(e:Entity) WHERE o.subsystem IS NOT NULL
+WITH e.project AS project, o.subsystem AS tag, count(o) AS n
+ORDER BY n DESC
+WITH project, collect({tag: tag, n: n})[0] AS top, sum(n) AS tagged
+WITH project, top, tagged, toInteger(100.0 * top.n / tagged) AS pct
+WHERE tagged >= 40 AND pct > 40
+RETURN '  ' + coalesce(project,'no project') + ': ' + top.tag + ' holds ' + toString(top.n) +
+       ' of ' + toString(tagged) + ' tagged observation(s) (' + toString(pct) + '%)' AS row
+ORDER BY pct DESC;")"
+if [ -n "$DOMINANT" ]; then
+  WARNINGS="${WARNINGS}Subsystem maps that have collapsed into one bucket (split it: npm run backfill-subsystems -- --retag TAG):
+${DOMINANT}
+
+"
+fi
+
+# Untagged history, which the map reports as an honest count but no rule acts on.
+# Pinned-type entities are excluded deliberately: a user preference or a
+# project-wide constraint has no subsystem by design and reaches the model
+# through the pinned-facts block, so counting those as unclassified would
+# indict correct behaviour. The predicate matches src/lib/graph.js PINNED_MATCH.
+# The exclusion is worth its cost: this project holds 62 untagged observations,
+# 15 of them pinned, so the honest figure is 47 (16%) rather than 62 (21%).
+# Same calibration caveat as above, and thinner here - healthy projects measure
+# 0-25%, the flagged one 34%, the reported case 41%. 30% leaves only five points
+# of daylight above the healthiest, so this is the likelier of the two to cry
+# wolf on a project that simply hasn't been backfilled yet.
+UNCLASSIFIED="$(run_query "
+MATCH (o:Observation)-[:ABOUT]->(e:Entity)
+WITH e.project AS project, o,
+     (any(t IN ['user','preference','constraint','convention']
+          WHERE toLower(coalesce(e.type,'')) STARTS WITH t) OR e.name = 'user') AS pinned
+WITH project, count(o) AS total,
+     sum(CASE WHEN o.subsystem IS NULL AND NOT pinned THEN 1 ELSE 0 END) AS unclassified
+WITH project, total, unclassified, toInteger(100.0 * unclassified / total) AS pct
+WHERE total >= 40 AND pct > 30
+RETURN '  ' + coalesce(project,'no project') + ': ' + toString(unclassified) + ' of ' +
+       toString(total) + ' observation(s) carry no subsystem (' + toString(pct) +
+       '%), excluding cross-cutting facts where null is correct' AS row
+ORDER BY pct DESC;")"
+if [ -n "$UNCLASSIFIED" ]; then
+  WARNINGS="${WARNINGS}Projects with a large unclassified history (tag it: npm run backfill-subsystems -- --dry-run):
+${UNCLASSIFIED}
+
+"
+fi
+
+# A tag named after the project itself. Every observation in a project is about
+# that project, so such a tag partitions nothing by construction - it is a junk
+# drawer whichever share it holds, which is what the two checks above cannot
+# see. Measured live: context-watch-plugin's biggest tag was "context-watch",
+# and once its untagged history was backfilled the share check fell to 36% and
+# went quiet while the tag went on meaning exactly as little as before.
+#
+# Matched on tokens rather than as a substring, because a substring test fires
+# on accidents: 'malleus' contains "alle", so a three-letter tag can match a
+# project it has nothing to do with. Tokens are compared against the last path
+# segment only, so 'github' and a user name can never be a tag's whole meaning.
+# This catches one species of vacuous tag precisely rather than vacuity in
+# general - a tag can partition nothing without borrowing the project's name.
+SELFNAMED="$(run_query "
+MATCH (o:Observation)-[:ABOUT]->(e:Entity)
+WHERE o.subsystem IS NOT NULL AND e.project IS NOT NULL
+WITH e.project AS project, o.subsystem AS tag, count(o) AS n
+WITH project, tag, n,
+     split(replace(last(split(project,'/')),'_','-'),'-') AS baseTokens,
+     split(tag,'-') AS tagTokens
+WHERE all(t IN tagTokens WHERE t IN baseTokens)
+RETURN '  ' + project + ': ' + tag + ' (' + toString(n) + ' observation(s)) repeats the project name' AS row
+ORDER BY n DESC;")"
+if [ -n "$SELFNAMED" ]; then
+  WARNINGS="${WARNINGS}Subsystem tags named after their own project, which separate nothing (npm run backfill-subsystems -- --retag TAG):
+${SELFNAMED}
+
+"
+fi
+
 if [ -n "$WARNINGS" ]; then
   echo
   printf '%s' "$WARNINGS"

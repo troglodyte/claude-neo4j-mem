@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { withSession, int } from "./neo4jClient.js";
 import { resolveCanonicalName } from "./dedup.js";
-import { resolveSubsystem, UNTAGGED } from "./subsystem.js";
+import { resolveSubsystem, parseSubsystemFilter, UNTAGGED } from "./subsystem.js";
 import { BUDGETS, truncateText, fitToBudget } from "./budget.js";
 import { classifyRelevance, topScore, describeRelevance } from "./relevance.js";
 
@@ -22,6 +22,17 @@ function escapeLuceneQuery(query) {
 // unknown) - every project-scoped MATCH/MERGE below spells the comparison out
 // as "(project IS NOT NULL AND x.project = $project) OR (project IS NULL AND
 // x.project IS NULL)" instead of relying on map-literal equality.
+
+// The subsystem predicate, spelled once. It reads two parameters rather than
+// one because the filter has three states (see parseSubsystemFilter), and it
+// takes the node alias because the five sites that need it are matching under
+// three different names - `o` in the observation scans, `node` after a
+// fulltext YIELD, and `o` again inside an EXISTS over an entity's observations.
+// Both conjuncts are always present and one of them is always trivially true,
+// which keeps the two states from drifting apart across those sites.
+const subsystemFilter = (alias) =>
+  `($subsystem IS NULL OR ${alias}.subsystem = $subsystem)
+          AND (NOT $untaggedOnly OR ${alias}.subsystem IS NULL)`;
 
 async function upsertEntity(session, name, type, project) {
   await session.run(
@@ -180,17 +191,18 @@ export async function createRelation({ from, to, type, project }) {
 }
 
 export async function searchMemory(query, limit = 10, project = null, { subsystem = null } = {}) {
+  const filter = parseSubsystemFilter(subsystem);
   return withSession(async (session) => {
     const result = await session.run(
       `CALL {
          CALL db.index.fulltext.queryNodes('entityNameFulltext', $query) YIELD node, score
          WITH node AS entity, score
-         WHERE $subsystem IS NULL
-            OR EXISTS { MATCH (o:Observation)-[:ABOUT]->(entity) WHERE o.subsystem = $subsystem }
+         WHERE ($subsystem IS NULL AND NOT $untaggedOnly)
+            OR EXISTS { MATCH (o:Observation)-[:ABOUT]->(entity) WHERE ${subsystemFilter("o")} }
          RETURN entity, score
          UNION
          CALL db.index.fulltext.queryNodes('observationTextFulltext', $query) YIELD node, score
-         WHERE $subsystem IS NULL OR node.subsystem = $subsystem
+         WHERE ${subsystemFilter("node")}
          MATCH (node)-[:ABOUT]->(entity)
          RETURN entity, score
        }
@@ -207,35 +219,54 @@ export async function searchMemory(query, limit = 10, project = null, { subsyste
        // Pull the observations that actually matched the query, best first.
        // Without this the entity's newest observations were returned instead,
        // so a hit buried in a large entity's history was scored but never shown.
+       // Returns collect(...) rather than one row per observation, because a
+       // CALL subquery is a join, not an OPTIONAL one: an entity matched only
+       // by its name has no query-matching observation, and the empty inner
+       // result used to eliminate the entity itself. The name index scored it
+       // and nothing ever returned it - which silently defeated the Lucene
+       // escaping above, whose whole purpose is finding an entity by its name.
+       // Aggregating inside the subquery always yields exactly one row (an
+       // empty list when nothing matched), so the outer row survives.
        CALL {
          WITH entity
          CALL db.index.fulltext.queryNodes('observationTextFulltext', $query) YIELD node, score AS obsScore
-         WHERE $subsystem IS NULL OR node.subsystem = $subsystem
+         WHERE ${subsystemFilter("node")}
          MATCH (node)-[:ABOUT]->(entity)
-         RETURN node.text AS text
+         WITH {text: node.text, subsystem: node.subsystem} AS obs, obsScore
          ORDER BY obsScore DESC
          LIMIT 5
+         RETURN collect(obs) AS matched
        }
-       WITH entity, rankScore, collect(text) AS matched
+       WITH entity, rankScore, matched
        // Top up with recent observations so an entity matched only by name
        // (or by fewer than five observations) still comes back with context.
        OPTIONAL MATCH (o:Observation)-[:ABOUT]->(entity)
-       WHERE $subsystem IS NULL OR o.subsystem = $subsystem
+       WHERE ${subsystemFilter("o")}
        WITH entity, rankScore, matched, o
        ORDER BY o.createdAt DESC
-       WITH entity, rankScore, matched, collect(o.text) AS recent
+       // The CASE keeps a no-match OPTIONAL MATCH collecting nothing: collect()
+       // drops nulls, but a map built from a null node is a non-null map of nulls.
+       WITH entity, rankScore, matched,
+            collect(CASE WHEN o IS NULL THEN NULL ELSE {text: o.text, subsystem: o.subsystem} END) AS recent
+       // Deduplicated on text rather than on the whole map: the two lists are
+       // built from the same properties today, and comparing only what is
+       // displayed keeps that from being load-bearing.
+       WITH entity, rankScore, matched, recent, [m IN matched | m.text] AS matchedTexts
        WITH entity, rankScore,
-            (matched + [t IN recent WHERE NOT t IN matched])[0..5] AS observations
+            (matched + [r IN recent WHERE NOT r.text IN matchedTexts])[0..5] AS observations
        OPTIONAL MATCH (entity)-[r:RELATES_TO]-(other)
        WITH entity, rankScore, observations, collect(DISTINCT CASE WHEN r IS NULL THEN NULL ELSE {type: r.type, entity: other.name} END) AS relationsRaw
        WITH entity, rankScore, observations, [x IN relationsRaw WHERE x IS NOT NULL] AS relations
        RETURN entity.name AS name, entity.type AS type, rankScore AS score, observations, relations
        ORDER BY rankScore DESC`,
-      { query: escapeLuceneQuery(query), limit: int(limit), project: project ?? null, subsystem }
+      { query: escapeLuceneQuery(query), limit: int(limit), project: project ?? null, ...filter }
     );
     const rows = result.records.map((r) => {
       const row = r.toObject();
-      return { ...row, observations: row.observations.map((t) => truncateText(t, BUDGETS.searchTextChars)) };
+      return {
+        ...row,
+        observations: row.observations.map((o) => ({ ...o, text: truncateText(o.text, BUDGETS.searchTextChars) })),
+      };
     });
     const kept = fitToBudget(rows, BUDGETS.searchTotalChars).kept;
 
@@ -273,7 +304,7 @@ export async function getEntity(name, project = null, { limit = 50 } = {}) {
       `${RESOLVE_ENTITY_MATCH}
        OPTIONAL MATCH (o:Observation)-[:ABOUT]->(e)
        WITH e, o ORDER BY o.createdAt DESC
-       WITH e, collect(CASE WHEN o IS NULL THEN NULL ELSE {id: o.id, text: o.text, createdAt: toString(o.createdAt)} END) AS observationsRaw
+       WITH e, collect(CASE WHEN o IS NULL THEN NULL ELSE {id: o.id, text: o.text, subsystem: o.subsystem, createdAt: toString(o.createdAt)} END) AS observationsRaw
        WITH e, [x IN observationsRaw WHERE x IS NOT NULL] AS allObservations
        WITH e, allObservations, size(allObservations) AS observationCount
        WITH e, observationCount,
@@ -298,24 +329,28 @@ export async function getEntity(name, project = null, { limit = 50 } = {}) {
 }
 
 export async function getRecentContext({ project, limit = 15, subsystem = null }) {
+  const filter = parseSubsystemFilter(subsystem);
   return withSession(async (session) => {
     const result = await session.run(
       `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
        WHERE ($project IS NULL OR e.project = $project OR e.project IS NULL)
-         AND ($subsystem IS NULL OR o.subsystem = $subsystem)
+         AND ${subsystemFilter("o")}
        WITH e, o ORDER BY o.createdAt DESC
-       WITH e, collect(o.text)[0..3] AS observations, max(o.createdAt) AS lastSeen
+       WITH e, collect({text: o.text, subsystem: o.subsystem})[0..3] AS observations, max(o.createdAt) AS lastSeen
        ORDER BY lastSeen DESC
        LIMIT $limit
        RETURN e.name AS name, e.type AS type, observations
        ORDER BY lastSeen DESC`,
-      { project: project ?? null, limit: int(limit), subsystem }
+      { project: project ?? null, limit: int(limit), ...filter }
     );
-    // This is the SessionStart injection, paid once per session on every
-    // session, so it gets the tightest budget of any read path.
+    // Budgeted tightest of any read path: this used to be the SessionStart
+    // injection, which now renders from getPinnedFacts + getSubsystemMap.
     const rows = result.records.map((r) => {
       const row = r.toObject();
-      return { ...row, observations: row.observations.map((t) => truncateText(t, BUDGETS.recentTextChars)) };
+      return {
+        ...row,
+        observations: row.observations.map((o) => ({ ...o, text: truncateText(o.text, BUDGETS.recentTextChars) })),
+      };
     });
     return fitToBudget(rows, BUDGETS.recentTotalChars).kept;
   });
@@ -409,14 +444,15 @@ export async function getTimeline({
   maxTextChars = BUDGETS.timelineTextChars,
   maxTotalChars = BUDGETS.timelineTotalChars,
 } = {}) {
+  const filter = parseSubsystemFilter(subsystem);
   return withSession(async (session) => {
     const countResult = await session.run(
       `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
        WHERE ($project IS NULL OR e.project = $project OR e.project IS NULL)
          AND ($since IS NULL OR o.createdAt >= datetime($since))
-         AND ($subsystem IS NULL OR o.subsystem = $subsystem)
+         AND ${subsystemFilter("o")}
        RETURN count(o) AS total`,
-      { project: project ?? null, since: since ?? null, subsystem }
+      { project: project ?? null, since: since ?? null, ...filter }
     );
     const total = countResult.records[0]?.get("total")?.toNumber() ?? 0;
 
@@ -424,11 +460,11 @@ export async function getTimeline({
       `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
        WHERE ($project IS NULL OR e.project = $project OR e.project IS NULL)
          AND ($since IS NULL OR o.createdAt >= datetime($since))
-         AND ($subsystem IS NULL OR o.subsystem = $subsystem)
+         AND ${subsystemFilter("o")}
        RETURN e.name AS entity, e.type AS type, o.text AS text, toString(o.createdAt) AS createdAt
        ORDER BY o.createdAt ASC
        LIMIT $limit`,
-      { project: project ?? null, since: since ?? null, limit: int(limit), subsystem }
+      { project: project ?? null, since: since ?? null, limit: int(limit), ...filter }
     );
 
     const rows = result.records.map((r) => {

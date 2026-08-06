@@ -52,8 +52,14 @@ function printEntity(e) {
   console.log(`\n${e.name}${e.type ? ` (${e.type})` : ""}`);
   if (e.score !== undefined) console.log(`  score: ${e.score.toFixed(3)}`);
   for (const o of e.observations ?? []) {
-    if (typeof o === "string") console.log(`  - ${o}`);
-    else console.log(`  - [${o.id}] ${o.text}${o.createdAt ? ` (${o.createdAt})` : ""}`);
+    // search/recent return {text, subsystem}; get-entity adds id and createdAt.
+    if (typeof o === "string") {
+      console.log(`  - ${o}`);
+      continue;
+    }
+    const id = o.id ? `[${o.id}] ` : "";
+    const tag = o.subsystem ? ` {${o.subsystem}}` : "";
+    console.log(`  - ${id}${o.text}${tag}${o.createdAt ? ` (${o.createdAt})` : ""}`);
   }
   for (const r of e.relations ?? e.outgoing ?? []) {
     console.log(`  -> ${r.type} -> ${r.entity}`);

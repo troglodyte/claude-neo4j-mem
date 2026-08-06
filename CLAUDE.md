@@ -86,8 +86,9 @@ normal. Several ran that way before it was noticed.
 - `npm run usage` (or `scripts/memory-usage.sh`) — cross-project usage report:
   every project in the db with entity/observation counts, first-seen, obs in
   last 7 days, last activity, plus totals and hygiene warnings (duplicate
-  project names, oversized entities, empty stubs, expensive subsystem maps).
-  `--quiet` for table only.
+  project names, oversized entities, empty stubs, expensive subsystem maps,
+  and — the opposite failure — a map collapsed into one dominant tag or a
+  large unclassified history). `--quiet` for table only.
 - `npm run token-cost [-- --all]` — measures every read path against a
   per-call ceiling and exits non-zero on regression.
 - `npm run telemetry [-- --days N]` — access patterns from

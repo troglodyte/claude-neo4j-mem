@@ -46,7 +46,7 @@ function parseArgs(argv) {
 async function probesFor(project) {
   const recent = await graph.getRecentContext({ project, limit: 15 });
   const biggest = recent[0]?.name ?? "user";
-  const searchTerm = recent[0]?.observations?.[0]?.split(/\s+/).find((w) => w.length > 5) ?? "the";
+  const searchTerm = recent[0]?.observations?.[0]?.text?.split(/\s+/).find((w) => w.length > 5) ?? "the";
   return { biggest, searchTerm };
 }
 

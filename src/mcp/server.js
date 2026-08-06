@@ -43,14 +43,19 @@ registerTool(
   {
     query: z.string().describe("Search text"),
     limit: z.number().int().min(1).max(50).optional(),
-    subsystem: z.string().optional().describe("Narrow to one subsystem tag, as listed in the SessionStart memory map"),
+    subsystem: z
+      .string()
+      .optional()
+      .describe(
+        "Narrow to one subsystem tag, as listed in the SessionStart memory map. Pass '(untagged)' to select only observations with no tag. Every returned observation carries its own `subsystem` (null when untagged)."
+      ),
   },
   async ({ query, limit, subsystem }) => graph.searchMemory(query, limit ?? 10, project, { subsystem })
 );
 
 registerTool(
   "memory_get_entity",
-  "Get detail for one entity: its most recent observations plus all incoming and outgoing relations to other entities. Observations are capped (default 50, newest first) since an entity's history can be arbitrarily long; `observationCount` reports the true total, so raise `limit` if you need more than what came back.",
+  "Get detail for one entity: its most recent observations plus all incoming and outgoing relations to other entities. Each observation carries its `subsystem` (null for cross-cutting facts). Observations are capped (default 50, newest first) since an entity's history can be arbitrarily long; `observationCount` reports the true total, so raise `limit` if you need more than what came back.",
   { name: z.string(), limit: z.number().int().positive().optional().describe("Max observations to return (default 50, newest first)") },
   async ({ name, limit }) => {
     const entity = await graph.getEntity(name, project, { limit: limit ?? 50 });
@@ -68,7 +73,9 @@ registerTool(
     subsystem: z
       .string()
       .optional()
-      .describe("Area this batch belongs to, e.g. 'auto-capture', 'search'. Reuse a tag from the SessionStart memory map when one fits; omit for cross-cutting facts like user preferences."),
+      .describe(
+        "Area this batch belongs to, e.g. 'auto-capture', 'search'. Reuse a tag from the SessionStart memory map when one fits; omit for cross-cutting facts like user preferences. Reclassifying existing observations is a maintenance script, not a tool: `npm run backfill-subsystems [--retag TAG] [--dry-run]`."
+      ),
   },
   async ({ entity, entityType, observations, subsystem }) => {
     const ids = await graph.addObservations({
@@ -104,7 +111,10 @@ registerTool(
   "List the most recently updated entities and their latest observations, scoped to the current project when possible. Useful as a general 'what do you remember' refresh.",
   {
     limit: z.number().int().min(1).max(50).optional(),
-    subsystem: z.string().optional().describe("Narrow to one subsystem tag"),
+    subsystem: z
+      .string()
+      .optional()
+      .describe("Narrow to one subsystem tag, or '(untagged)' for observations with no tag"),
   },
   async ({ limit, subsystem }) => graph.getRecentContext({ project, limit: limit ?? 15, subsystem })
 );
@@ -165,7 +175,10 @@ registerTool(
   {
     since: z.string().optional().describe("ISO 8601 date/time; only observations at or after this point are returned"),
     limit: z.number().int().min(1).max(500).optional().describe("Max events to return (default 100)"),
-    subsystem: z.string().optional().describe("Narrow to one subsystem tag"),
+    subsystem: z
+      .string()
+      .optional()
+      .describe("Narrow to one subsystem tag, or '(untagged)' for observations with no tag"),
   },
   async ({ since, limit, subsystem }) => graph.getTimeline({ project, since, limit: limit ?? 100, subsystem })
 );

@@ -6,6 +6,52 @@ Version numbers track `.claude-plugin/plugin.json` and `package.json`, which are
 kept in step deliberately: `claude plugin update` compares that string, so a
 release that doesn't move it never reaches any other project.
 
+## 0.6.0 — 2026-08-06
+
+- **Fixed** `searchMemory` returning nothing for an entity matched only by its
+  name. The subquery that pulls query-matching observations is a correlated
+  `CALL {}`, which is a join and not an optional one: an entity matched by the
+  name index has no observation matching that query, so it was joined against an
+  empty result and eliminated. Aggregating inside the subquery
+  (`RETURN collect(obs)`) always yields one row, so the entity survives. This had
+  silently defeated `escapeLuceneQuery` directly above it — that fix made the
+  index match, and this block then discarded the hit, so the symptom never
+  changed. Two independent causes behind one symptom; a name-only search returned
+  zero rows, which `relevance.js` reads as a true miss, so past telemetry
+  overstates the read-side miss rate by however many name lookups it saw.
+- **Added** `subsystem` to every read path. It was input-and-write-only before:
+  no tool returned it, so answering "what subsystem is this in?" meant one call
+  per candidate tag and a set difference. `memory_get_entity` gains a field;
+  `memory_search` and `memory_recent` now return `{text, subsystem}` objects.
+  **Breaking**: those two returned bare strings before. Measured cost is +9.5%
+  and +15.0% of payload characters, well inside the existing budgets — no rows
+  are dropped and `BUDGETS` is unchanged.
+- **Fixed** the subsystem map advertising a bucket the API rejected. The map
+  renders untagged observations as `(untagged)` beside real tags and tells the
+  reader to pass a tag back, but every filter compared literally, so nothing
+  could ever match `o.subsystem IS NULL`. `parseSubsystemFilter` is the read-side
+  counterpart to `resolveSubsystem`: three states, since "no filter" and "only
+  untagged" are different questions a nullable string can't both express. It also
+  normalizes like a written tag, so `Auto-Capture` selects `auto-capture` — the
+  round-trip gap was wider than `(untagged)`. A regression test asserts every row
+  the map renders selects a non-empty result, since the map is built by one code
+  path and consumed by another and nothing checked they agreed on a vocabulary.
+- **Added** three hygiene checks to `npm run usage`, all detecting the opposite
+  failure to the existing fragmentation rule — that rule measures the rendered
+  map in characters, so a map collapsed into one bucket is *small* and passes it
+  silently. A dominant tag above 40% of tagged observations, an unclassified
+  history above 30% (excluding pinned-type entities, where null is correct by
+  design), and a tag named after its own project. The first two are thresholds
+  calibrated against the nine projects in one database — healthy ones span
+  16–36% and 0–25%, so the margin is four and five points respectively; the
+  comments say so rather than letting the numbers read as principled. The third
+  needs no threshold: a tag repeating the project name partitions nothing at any
+  share, which is exactly what the first two miss. Found live on two projects.
+- **Added** discoverability for the retag tooling, which existed only as a flag
+  in a maintenance script. `npm run backfill-subsystems --retag TAG` is now named
+  in the `memory-status` skill and in the `memory_add_observations` description,
+  and `(untagged)` is documented on every `subsystem` parameter.
+
 ## 0.5.0 — 2026-08-03
 
 - **Fixed** `memory_search` presenting a fragment match as an answer. The

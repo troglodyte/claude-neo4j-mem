@@ -81,3 +81,27 @@ export function resolveSubsystem(value, knownSubsystems = []) {
   if (!slug || CATCH_ALL_TAGS.has(slug)) return null;
   return resolveCanonicalName(slug, filterVocabulary(knownSubsystems));
 }
+
+/**
+ * The read-side counterpart to resolveSubsystem: turns a caller's `subsystem`
+ * argument into the two things a query needs - the tag to match, and whether to
+ * select the untagged bucket instead. Three states, because "no filter" and
+ * "only rows with no tag" are different questions and a single nullable string
+ * can only express one of them.
+ *
+ * The subsystem map renders untagged observations as `(untagged)` next to real
+ * tags and tells the reader to pass a tag back to read it, so that label has to
+ * round-trip; before this it matched nothing, since `o.subsystem = '(untagged)'`
+ * is false for the `NULL` those rows actually hold.
+ *
+ * A catch-all name lands in the same bucket for the same reason: writes fold
+ * "general"/"misc" to null, so on read they can only mean the untagged rows.
+ * Anything else is normalized exactly as a written tag would be, so a tag can
+ * be selected the way it was spelled rather than only the way it was stored.
+ */
+export function parseSubsystemFilter(value) {
+  const slug = normalizeSubsystem(value);
+  if (!slug) return { subsystem: null, untaggedOnly: false };
+  if (CATCH_ALL_TAGS.has(slug)) return { subsystem: null, untaggedOnly: true };
+  return { subsystem: slug, untaggedOnly: false };
+}

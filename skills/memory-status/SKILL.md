@@ -17,6 +17,22 @@ For a deeper report, run `scripts/memory-usage.sh` from the plugin directory. On
 
 Do not write ad-hoc Cypher for these questions when the tools above answer them.
 
+## "This project's subsystem tags are a mess / everything is untagged"
+
+The SessionStart map and `npm run usage` both surface fragmentation — a junk-drawer
+tag holding most of the graph, three-observation slivers that should be merged, or a
+large `(untagged)` bucket. Every read tool returns each observation's `subsystem`, and
+`memory_search` / `memory_recent` / `memory_timeline` accept `subsystem: "(untagged)"`
+to enumerate the unclassified ones, so the diagnosis can be made in-session.
+
+Acting on it is a maintenance script, not an MCP tool, because reclassification is an
+LLM pass over every affected observation: `npm run backfill-subsystems` tags whatever
+is currently untagged, and `--retag TAG` reclassifies observations already carrying a
+tag (`--retag general` is how a junk drawer gets emptied). Both take `--dry-run` to
+show the proposed tags without writing, and `--project NAME` to scope to one project.
+Retagging edits observations in place — ids, timestamps and session links are
+preserved — so it is safe to re-run and safe to interrupt.
+
 ## Running arbitrary Cypher
 
 If the user genuinely needs a query the tools do not cover, use `scripts/cypher.sh "<query>"`. It resolves credentials automatically and, in local mode, borrows the `cypher-shell` binary from inside the Neo4j container — so **nothing needs to be installed**. It only asks the user to install `cypher-shell` when connecting to a remote database from a host that lacks it, and even then the `memory_*` tools and `npm run memory -- <cmd>` keep working without it. Never tell the user they must install cypher-shell before checking that fallback.
