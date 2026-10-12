@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/hooks/session-start.js\""
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/bin/memory-node\" --hook \"${CLAUDE_PLUGIN_ROOT}/src/hooks/session-start.js\""
           }
         ]
       }
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/hooks/capture.js\"",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/bin/memory-node\" --hook \"${CLAUDE_PLUGIN_ROOT}/src/hooks/capture.js\"",
             "timeout": 100
           }
         ]
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/hooks/capture.js\"",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/bin/memory-node\" --hook \"${CLAUDE_PLUGIN_ROOT}/src/hooks/capture.js\"",
             "timeout": 100
           }
         ]

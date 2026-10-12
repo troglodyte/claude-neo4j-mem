@@ -8,18 +8,18 @@
     "backfill-subsystems": "node scripts/backfill-subsystems.mjs",
     "backup": "bash scripts/backup.sh",
     "configure": "node scripts/configure.mjs",
-    "mcp-server": "node src/mcp/server.js",
-    "memory": "node scripts/memory-cli.mjs",
+    "mcp-server": "bash bin/memory-node src/mcp/server.js",
+    "memory": "bash bin/memory-node scripts/memory-cli.mjs",
     "migrate-claude-mem": "node scripts/migrate-from-claude-mem.mjs",
     "migrate-to-podman": "bash scripts/migrate-to-podman.sh",
-    "migrate-to-sqlite": "node scripts/migrate-to-sqlite.mjs",
+    "migrate-to-sqlite": "bash bin/memory-node scripts/migrate-to-sqlite.mjs",
     "restore": "bash scripts/restore.sh",
-    "search-parity": "node scripts/search-parity.mjs",
+    "search-parity": "bash bin/memory-node scripts/search-parity.mjs",
     "search-review": "node scripts/search-payload-review.mjs",
     "telemetry": "node scripts/telemetry-report.mjs",
-    "test": "bash tests/launcher-path.test.sh && bash tests/engine-resolve.test.sh && bash tests/image-name.test.sh && bash tests/boot-persistence.test.sh && node --test tests/**/*.test.js",
-    "test:ci": "bash tests/launcher-path.test.sh && bash tests/engine-resolve.test.sh && bash tests/image-name.test.sh && bash tests/boot-persistence.test.sh && node --test $(ls tests/*.test.js | grep -v \"/graph-\")",
-    "token-cost": "node scripts/token-cost.mjs",
+    "test": "bash tests/launcher-path.test.sh && bash tests/memory-node.test.sh && bash tests/engine-resolve.test.sh && bash tests/image-name.test.sh && bash tests/boot-persistence.test.sh && node --test tests/*.test.js",
+    "test:ci": "bash tests/launcher-path.test.sh && bash tests/memory-node.test.sh && bash tests/engine-resolve.test.sh && bash tests/image-name.test.sh && bash tests/boot-persistence.test.sh && node --test tests/*.test.js",
+    "token-cost": "bash bin/memory-node scripts/token-cost.mjs",
     "usage": "bash scripts/memory-usage.sh"
   },
   "dependencies": {
@@ -28,6 +28,6 @@
     "zod": "^3.24.0"
   },
   "engines": {
-    "node": ">=18.17"
+    "node": ">=22.13"
   }
 }

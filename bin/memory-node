@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# Runs a memory process (the MCP server or a hook) under the first Node that has
+# node:sqlite unflagged: 22.13+ in 22.x, 23.4+ in 23.x, any 24+. Repos pin older
+# Nodes through nvm, and Claude Code starts hooks and MCP servers with whatever
+# `node` that shell resolved, so `node` on PATH alone is not enough.
+#
+#   bash bin/memory-node [--hook] <script> [args...]
+#
+# Tried in order: $CLAUDE_NEO4J_NODE, `node` on PATH, the newest under nvm, fnm
+# and volta, then Homebrew ($HOMEBREW_PREFIX, else /opt/homebrew and /usr/local).
+# With none: --hook prints a one-line systemMessage and exits 0 so the session
+# carries on; without it (the MCP server) it exits 1, so Claude Code shows the
+# server as failed instead of hanging.
+#
+# Must stay bash 3.2-compatible: macOS runs this with /bin/bash.
+set -uo pipefail
+
+hook=0
+if [ "${1:-}" = "--hook" ]; then
+  hook=1
+  shift
+fi
+
+# True when the Node binary $1 reports a version with unflagged node:sqlite.
+has_sqlite() {
+  local v major rest minor
+  v="$("$1" --version 2>/dev/null)" || return 1
+  v="${v#v}"
+  major="${v%%.*}"
+  rest="${v#*.}"
+  minor="${rest%%.*}"
+  [[ $major =~ ^[0-9]+$ && $minor =~ ^[0-9]+$ ]] || return 1
+  ((major >= 24 || (major == 23 && minor >= 4) || (major == 22 && minor >= 13)))
+}
+
+# newest DIR TAIL: the Nodes at DIR/<version>TAIL, newest first. Versions are keyed
+# numerically, because a plain sort puts v9 after v22. A leading "v" is optional.
+newest() {
+  local dir="$1" tail="$2" bin v a b c
+  for bin in "$dir"/*"$tail"; do
+    [ -x "$bin" ] || continue
+    v="${bin#"$dir"/}"
+    v="${v%%/*}"
+    v="${v#v}"
+    IFS=. read -r a b c <<<"$v"
+    [[ ${a:-} =~ ^[0-9]+$ ]] || continue
+    printf '%05d%05d%05d %s\n' "$a" "${b:-0}" "${c%%[!0-9]*}" "$bin"
+  done | sort -r | cut -d' ' -f2-
+}
+
+candidates() {
+  local p bin
+  [ -n "${CLAUDE_NEO4J_NODE:-}" ] && printf '%s\n' "$CLAUDE_NEO4J_NODE"
+  command -v node 2>/dev/null
+  newest "${NVM_DIR:-$HOME/.nvm}/versions/node" "/bin/node"
+  newest "${FNM_DIR:-$HOME/.local/share/fnm}/node-versions" "/installation/bin/node"
+  newest "$HOME/Library/Application Support/fnm/node-versions" "/installation/bin/node"
+  newest "${VOLTA_HOME:-$HOME/.volta}/tools/image/node" "/bin/node"
+  for p in ${HOMEBREW_PREFIX:-/opt/homebrew /usr/local}; do
+    for bin in "$p"/bin/node "$p"/opt/node@*/bin/node; do
+      [ -x "$bin" ] && printf '%s\n' "$bin"
+    done
+  done
+}
+
+# Collected first: exec'ing inside a loop fed by process substitution would hand
+# the child that pipe as stdin, and hooks read Claude Code's JSON from stdin.
+list=()
+while IFS= read -r line; do
+  [ -n "$line" ] && list+=("$line")
+done < <(candidates)
+
+found=""
+for candidate in ${list[@]+"${list[@]}"}; do
+  if has_sqlite "$candidate"; then
+    exec "$candidate" --disable-warning=ExperimentalWarning "$@"
+  fi
+  found="${found:+$found; }$("$candidate" --version 2>/dev/null || echo unknown) ($candidate)"
+done
+
+message="memory needs Node 22.13+, 23.4+ or 24+ for node:sqlite; found: ${found:-none}. Install one with nvm, or set CLAUDE_NEO4J_NODE."
+if [ "$hook" = 1 ]; then
+  printf '{"systemMessage":"%s"}\n' "🧠 Memory: off — $message"
+  exit 0
+fi
+printf 'memory-node: %s\n' "$message" >&2
+exit 1
