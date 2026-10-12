@@ -6,7 +6,7 @@ export const CONFIG_DIR = path.join(os.homedir(), ".claude-neo4j");
 export const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
 export const STATE_DIR = path.join(CONFIG_DIR, "state");
 
-function readConfigFile() {
+export function readConfigFile() {
   try {
     return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
   } catch {
@@ -63,15 +63,6 @@ export function shouldNotifyOnWrite() {
 export function setNotifyOnWrite(enabled) {
   const fileConfig = readConfigFile() ?? {};
   writeConfigFile({ ...fileConfig, notifyOnWrite: enabled });
-}
-
-export function isConfigured() {
-  try {
-    loadConnectionConfig();
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 export function writeConfigFile(config) {

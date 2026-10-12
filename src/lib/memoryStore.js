@@ -1,5 +1,6 @@
 import { openMemoryDb } from "./sqliteDb.js";
 import { memoryDbPath } from "./config.js";
+import { storeState, offReason } from "./firstStart.js";
 
 // One connection per process, opened on first use. Hooks and the memory server
 // are separate processes, so concurrent writers meet in SQLite's WAL and busy
@@ -11,6 +12,12 @@ let open = null;
 export function getDb() {
   if (!open) {
     const file = memoryDbPath();
+    // A tool call or capture during the move must not create an empty store:
+    // first start would then see a store and never migrate.
+    const reason = offReason(storeState({ dbPath: file }));
+    if (reason) {
+      throw new Error(reason);
+    }
     open = { file, db: openMemoryDb(file) };
   }
   return open.db;

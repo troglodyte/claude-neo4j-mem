@@ -25,6 +25,7 @@ Commands:
                                        delete observations older than N days (default 180),
                                        keeping the most recent N per entity (default 3) regardless of age
   dupes [--min N]                     list likely repeated standing facts (default min 0.3) to merge or delete
+  start-fresh                         begin with an empty SQLite store; Neo4j is left untouched
   mute                                 stop relaying "remembered ..."/"forgot ..." confirmations mid-session
   unmute                               resume relaying write confirmations (default)
 
@@ -94,6 +95,13 @@ async function main() {
   });
   const project = flags.project ?? detectProject(process.cwd());
   const limit = flags.limit ? Number(flags.limit) : undefined;
+
+  // Before getDb(): the gate refuses to create a store while memory should be moving.
+  if (command === "start-fresh") {
+    const { startFresh } = await import("../src/lib/firstStart.js");
+    console.log(startFresh());
+    return;
+  }
 
   getDb();
 
