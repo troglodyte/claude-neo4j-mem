@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# LEGACY (Neo4j engine): kept to reach a Neo4j graph until it is retired. The SQLite equivalent is npm run backup|restore|health.
 # Restores the local Neo4j memory graph from an archive made by backup.sh.
 #
 # This REPLACES the current database. The archive is verified and the current

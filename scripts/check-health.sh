@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# LEGACY (Neo4j engine): kept to reach a Neo4j graph until it is retired. The SQLite equivalent is npm run backup|restore|health.
 # Verifies the whole neo4j-memory plugin stack end to end: container
 # health, plugin config file, Neo4j auth/connectivity, and the MCP server's
 # JSON-RPC handshake. Prints PASS/FAIL per check and exits non-zero if any fail.

@@ -6,21 +6,22 @@
   "private": true,
   "scripts": {
     "backfill-subsystems": "node scripts/backfill-subsystems.mjs",
-    "backup": "bash scripts/backup.sh",
+    "backup": "bash bin/memory-node scripts/backup.mjs",
     "configure": "node scripts/configure.mjs",
     "mcp-server": "bash bin/memory-node src/mcp/server.js",
     "memory": "bash bin/memory-node scripts/memory-cli.mjs",
     "migrate-claude-mem": "node scripts/migrate-from-claude-mem.mjs",
     "migrate-to-podman": "bash scripts/migrate-to-podman.sh",
     "migrate-to-sqlite": "bash bin/memory-node scripts/migrate-to-sqlite.mjs",
-    "restore": "bash scripts/restore.sh",
+    "restore": "bash bin/memory-node scripts/restore.mjs",
     "search-parity": "bash bin/memory-node scripts/search-parity.mjs",
     "search-review": "node scripts/search-payload-review.mjs",
     "telemetry": "node scripts/telemetry-report.mjs",
     "test": "bash tests/launcher-path.test.sh && bash tests/memory-node.test.sh && bash tests/engine-resolve.test.sh && bash tests/image-name.test.sh && bash tests/boot-persistence.test.sh && node --test tests/*.test.js",
     "test:ci": "bash tests/launcher-path.test.sh && bash tests/memory-node.test.sh && bash tests/engine-resolve.test.sh && bash tests/image-name.test.sh && bash tests/boot-persistence.test.sh && node --test tests/*.test.js",
     "token-cost": "bash bin/memory-node scripts/token-cost.mjs",
-    "usage": "bash scripts/memory-usage.sh"
+    "usage": "bash scripts/memory-usage.sh",
+    "health": "bash bin/memory-node scripts/check-health.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.19.0",
