@@ -6,7 +6,8 @@ import { detectProject } from "../lib/project.js";
 import { upsertSession, getPinnedFacts, getSubsystemMap } from "../lib/graph.js";
 import { renderInjection } from "../lib/injection.js";
 import { UNTAGGED } from "../lib/subsystem.js";
-import { storeStatus, closeDb } from "../lib/memoryStore.js";
+import { storeStatus, closeDb, getDb } from "../lib/memoryStore.js";
+import { catchUpDue, spawnCatchUp } from "../lib/catchUp.js";
 import { beginFirstStart } from "../lib/firstStart.js";
 import { consumeCaptureDigest } from "../lib/captureDigest.js";
 import { sweepPendingCaptures, pruneStaleState } from "./capture.js";
@@ -103,6 +104,13 @@ async function main() {
       systemMessage += ` Retrying ${retried} capture(s) that failed earlier; results land in ~/.claude-neo4j/capture.log.`;
     }
     pruneStaleState();
+    try {
+      if (catchUpDue(getDb())) {
+        spawnCatchUp();
+      }
+    } catch (error) {
+      process.stderr.write(`claude-neo4j: catch-up not started: ${error.message}\n`);
+    }
 
     process.stdout.write(
       JSON.stringify({
