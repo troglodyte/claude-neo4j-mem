@@ -23,7 +23,7 @@ describe("topScore", () => {
 
 describe("queryWords", () => {
   test("lowercase words longer than two characters", () => {
-    assert.deepEqual([...queryWords("Fix the JUMP-1463 bug, ok?")], ["fix", "the", "jump", "1463", "bug"]);
+    assert.deepEqual([...queryWords("Fix the ABC-1463 bug, ok?")], ["fix", "the", "abc", "1463", "bug"]);
   });
 });
 

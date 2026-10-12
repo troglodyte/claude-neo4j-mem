@@ -81,7 +81,7 @@ Acceptance against Neo4j on the logged searches:
 - Same top result on at least 95%. Measured 196 of 200 with this design's code, replayed on the 2026-10-08 snapshot.
 - The same queries return nothing on both.
 - The same relevance label (strong, weak or none) on at least 95%. Measured 208 of 214.
-  - Five of the six disagreements are Lucene calling a lone-word fragment strong (`JUMP-1463` matching only "jump").
+  - Five of the six disagreements are Lucene calling a lone-word fragment strong (`ABC-1463` matching only "abc").
   - The sixth is a Lucene "weak" whose best result held 8 of its 9 words.
   - The gate sits below the measurement because the logged searches keep growing and a disagreement is as likely to be Lucene's error as this rule's. A broken rule shows up as a collapse, not a two-point dip.
 
@@ -97,7 +97,7 @@ The `memory_search` tool description states what `direction` means.
 Measured on 693 standing facts in 28 project scopes (53,764 pairs), by word overlap:
 
 - 8 pairs score 0.8 or more. All are repeats, such as the same email address recorded twice.
-- The next pair down scores 0.73 and is two different tickets (ES-78 and ES-82).
+- The next pair down scores 0.73 and is two different tickets (XY-78 and XY-82).
 - Reworded repeats score lower than some genuinely different facts. This project's three score 0.65, 0.57 and 0.33, against 0.73 and 0.64 for pairs that differ. Wording alone cannot catch them safely.
 
 So:

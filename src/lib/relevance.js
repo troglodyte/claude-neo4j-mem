@@ -10,7 +10,7 @@
  * "zzz-nonexistent-term-qqq" finding "term". Measured on 214 logged searches
  * (2026-10-09), this agrees with the Lucene-era labels on 208. Five of the six
  * disagreements were Lucene calling a lone word "strong" just above its floor
- * ("JUMP-1463" matching only "jump"); the sixth was a Lucene "weak" whose best
+ * ("ABC-1463" matching only "abc"); the sixth was a Lucene "weak" whose best
  * result held 8 of its 9 words. bm25 scores cannot make the call: strong
  * matches scored from 3.47 and the weak one up to 10.84.
  */

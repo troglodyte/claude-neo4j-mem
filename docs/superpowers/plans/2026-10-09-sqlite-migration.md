@@ -23,7 +23,7 @@
 - At most five fingerprint comparisons (six reads) for a consistent read.
 - Exit codes: `0` nothing missing or changed; `1` the check found missing or changed rows; `2` the migration could not run.
 - Tests that need Neo4j are gated by `CLAUDE_NEO4J_REHEARSAL_URI` and refuse port 7687.
-- Commits follow the jht-skills commit skill: `type(scope): Capitalised subject`, plus a `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>` trailer.
+- Commits follow the commit convention: `type(scope): Capitalised subject`, plus a `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>` trailer.
 
 ## Review Focus
 
@@ -56,16 +56,16 @@
 | `tests/helpers/graphFixture.js` | One fixture graph holding every shape found in the live graph. |
 | `tests/sqlite-db.test.js` and `tests/migrate-*.test.js` | One test file per unit, plus `migrate-sabotage`, `migrate-cli` and the gated `migrate-rehearsal`. |
 
-All paths in this plan are relative to `plugins/jht-skills/` inside the worktree.
+All paths in this plan were relative to the plugin folder of the repo it was first written in; here they are relative to the repo root.
 
 ## Before you start
 
 - [ ] **Rename the branch and check the baseline**
 
 ```bash
-cd ~/code/jht-skills/.claude/worktrees/memory-sqlite-migration-spec
+cd <worktree>
 git branch -m docs/memory-sqlite-migration-spec feat/memory-sqlite-migration
-cd plugins/jht-skills
+cd <plugin folder>
 node --version
 ls node_modules/neo4j-driver/package.json
 node --test tests/*.test.js

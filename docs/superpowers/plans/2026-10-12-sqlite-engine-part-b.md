@@ -1907,7 +1907,7 @@ Scope note for Michael's review: the spec ports `backfill-subsystems.mjs`, `migr
 - [ ] **Step 4: README.** Rewrite it around SQLite. Keep the existing sections on tools, budgets, relevance, subsystems and telemetry that are still true. It must contain, in this order:
   1. **What it is**: one paragraph on local SQLite memory and what it injects, captures and exposes.
   2. **Requirements**: Node 22.13+/23.4+/24+ somewhere on the machine, and the launcher's search order.
-  3. **Install**, with the commands below. Then: if the install path (`installPath` in `~/.claude/plugins/installed_plugins.json`) has no `node_modules`, run `npm install --omit=dev --registry=https://registry.npmjs.org/` in it. All three dependencies are public, so this skips CodeArtifact.
+  3. **Install**, with the commands below. Then: if the install path (`installPath` in `~/.claude/plugins/installed_plugins.json`) has no `node_modules`, run `npm install --omit=dev --registry=https://registry.npmjs.org/` in it. All three dependencies are public, so this skips any private registry `~/.npmrc` names.
 
 ```bash
 claude plugin marketplace add troglodyte/claude-neo4j-mem
@@ -1988,10 +1988,10 @@ closeDb();
 
   Smoke-test it: `HOME=$(mktemp -d) bash bin/memory-node scripts/remove-test-rows.mjs` prints `0 test entities …` and `dry run`.
 
-- [ ] **Step 8: Public-repo review.** Run, and list every hit (file:line and text) for Michael without editing any:
+- [ ] **Step 8: Public-repo review.** Run this, where `~/.config/public-repo-terms` (kept outside the repo) holds one pattern per line for the employer's internal identifiers and ticket keys, and list every hit (file:line and text) for Michael without editing any:
 
 ```bash
-rg -n -i "401257549720|codeartifact|jht-rdweb|jhtna|bitbucket|johnsonfit|jht-ss-|AWS_PROFILE|\b(JUMP|AW|ES|RICD)-[0-9]+" -g '!node_modules' -g '!package-lock.json' .
+rg -n -i -f "$HOME/.config/public-repo-terms" -g '!node_modules' -g '!package-lock.json' .
 ```
 
 - [ ] **Step 9: Verify and commit**
@@ -2010,7 +2010,7 @@ git commit -m "Document the SQLite engine and release it (0.7.0)" -m "Co-Authore
 
 Run each step from `$HOME`, not from inside the repo: `claude plugin` commands run inside a repo can rewrite its `.claude/settings.json`. Stop at each **GATE** and wait for Michael's yes. `$SCRATCH` is the session scratchpad.
 
-On this machine, jht-skills 0.13.0 still carries the Neo4j engine, and it reads the same `~/.claude-neo4j/config.json` and the same `CLAUDE_NEO4J_DISABLE_CAPTURE`. Its memory goes quiet once the Neo4j password leaves `config.json` (Step 7). Its tools are hidden with a permission rule.
+On this machine, the work plugin (0.13.0) still carries the Neo4j engine, and it reads the same `~/.claude-neo4j/config.json` and the same `CLAUDE_NEO4J_DISABLE_CAPTURE`. Its memory goes quiet once the Neo4j password leaves `config.json` (Step 7). Its tools are hidden with a permission rule.
 
 - [ ] **Step 1 (GATE: push).** After Michael resolves the Task 7 Step 8 findings: fast-forward `main` to this branch and `git push origin main`.
 
@@ -2048,20 +2048,20 @@ Expected: `first start: memory moved to …/memory.sqlite`, `result: "passed"`, 
 ```bash
 cp ~/.claude/settings.json ~/.claude/settings.json.pre-sqlite-$(date +%Y%m%d)
 jq 'del(.env.CLAUDE_NEO4J_DISABLE_CAPTURE)
-    | .permissions.deny = ((.permissions.deny // []) + ["mcp__plugin_jht-skills_neo4j-memory"] | unique)' \
+    | .permissions.deny = ((.permissions.deny // []) + ["mcp__plugin_<work-plugin>_neo4j-memory"] | unique)' \
   ~/.claude/settings.json > "$SCRATCH/settings.json" && mv "$SCRATCH/settings.json" ~/.claude/settings.json
 cd ~/.claude-neo4j && umask 077 && jq '{mode, uri, username, password, database}' config.json > neo4j-legacy.json \
   && jq 'del(.password, .uri, .username, .database, .mode)' config.json > config.new && mv config.new config.json && chmod 600 config.json neo4j-legacy.json
 ```
 
-  With the password out of `config.json`, jht-skills' capture stays off (it checks `isConfigured()`), its session start shows one harmless "not configured yet" line, and the catch-up skips quietly. The password stays in `neo4j-legacy.json` and `config.json.pre-sqlite`.
+  With the password out of `config.json`, the work plugin's capture stays off (it checks `isConfigured()`), its session start shows one harmless "not configured yet" line, and the catch-up skips quietly. The password stays in `neo4j-legacy.json` and `config.json.pre-sqlite`.
 
 - [ ] **Step 8 (GATE: stop Neo4j).** `podman stop claude-neo4j-memory && podman update --restart=no claude-neo4j-memory`. The volume stays.
 
-- [ ] **Step 9: Verify.** `cd "$IP" && npm run health` is all PASS. In a new session: the session-start line comes from SQLite; `memory_search` answers a known past fact; jht-skills' memory tools are absent. After that session ends, `tail -3 ~/.claude-neo4j/capture.log` shows a captured line, and `npm run memory -- status` counts rose.
+- [ ] **Step 9: Verify.** `cd "$IP" && npm run health` is all PASS. In a new session: the session-start line comes from SQLite; `memory_search` answers a known past fact; the work plugin's memory tools are absent. After that session ends, `tail -3 ~/.claude-neo4j/capture.log` shows a captured line, and `npm run memory -- status` counts rose.
 
 - [ ] **Step 10: Hand Michael the follow-ups.**
-  - A drafted edit to the Memory section of `~/.claude/CLAUDE.md` (it still names jht-skills' tools); he applies it.
+  - A drafted edit to the Memory section of `~/.claude/CLAUDE.md` (it still names the work plugin's tools); he applies it.
   - The `~/.claude-mem` that claude-mem's lingering hooks recreated after the uninstall: move it aside once every session has restarted.
   - The second machine: the README's "Moving a machine off Neo4j".
-  - Later: port or drop the three legacy scripts, remove memory from jht-skills, retire `neo4j-driver` and the container scripts, delete the Podman volume.
+  - Later: port or drop the three legacy scripts, remove memory from the work plugin, retire `neo4j-driver` and the container scripts, delete the Podman volume.

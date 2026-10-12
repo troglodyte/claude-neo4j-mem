@@ -37,7 +37,7 @@ Task 10 then replaces `graph.js` with it. It points the four existing `graph-*` 
 
   The first is for before Task 10, the second from Task 10 on.
 - ESM; builtins use the `node:` prefix. Source files in `src/lib/` are camelCase; tests are kebab-case `tests/*.test.js`.
-- **Braces.** After every Edit or Write of a `.js`/`.mjs` file, the jht-skills hook flags any line in the whole file that is a one-line `if`, `for`, `while` or `else` body, even inside a template string. Task 0 braces the existing files this plan edits. Brace every body you write.
+- **Braces.** After every Edit or Write of a `.js`/`.mjs` file, a brace-checking hook flags any line in the whole file that is a one-line `if`, `for`, `while` or `else` body, even inside a template string. Task 0 braces the existing files this plan edits. Brace every body you write.
 - The complexity hook warns above 10 per function. Keep new functions small; it is advisory.
 - `graph.js` keeps every exported name and signature. `findRepeatedFacts` is the only addition.
 - Storage follows the spec: version-2 full-text DDL exactly as written there, global entities stored as `project = ''` and returned as `null`, timestamps as integer milliseconds and returned as `new Date(ms).toISOString()`.
@@ -45,7 +45,7 @@ Task 10 then replaces `graph.js` with it. It points the four existing `graph-*` 
   - `REPEAT_COLLAPSE_OVERLAP = 0.8`
   - `REPEAT_REVIEW_OVERLAP = 0.3`
   - parity gates: top-1 agreement ≥ 0.95, relevance-label agreement ≥ 0.95, the same empty queries on both
-- Commits follow the jht-skills commit skill: `type(scope): Capitalised subject`, plus a `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>` trailer.
+- Commits follow the commit convention: `type(scope): Capitalised subject`, plus a `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>` trailer.
 
 ## Review Focus
 
@@ -80,14 +80,14 @@ Task 10 then replaces `graph.js` with it. It points the four existing `graph-*` 
 | `scripts/search-parity.mjs` | Replays logged searches through Lucene-era Neo4j search and the SQLite engine. |
 | `tests/helpers/tempStore.js` | `useTempStore()`. |
 
-All paths are relative to `plugins/jht-skills/` in the worktree `~/code/jht-skills/.claude/worktrees/memory-sqlite-engine` (branch `feat/memory-sqlite-engine`).
+All paths were relative to the plugin folder of the worktree this plan was first written in; here they are relative to the repo root.
 
 ## Before you start
 
 - [ ] **Check the baseline**
 
 ```bash
-cd ~/code/jht-skills/.claude/worktrees/memory-sqlite-engine/plugins/jht-skills
+cd <worktree>
 node --version
 ls node_modules/neo4j-driver/package.json
 HOME="$(mktemp -d)" node --test $(ls tests/*.test.js | grep -v '/graph-') 2>&1 | grep -E '^# (tests|pass|fail|skipped) '
@@ -127,7 +127,7 @@ These eight hold 54 brace-less lines between them. Every other file this plan ed
 ```bash
 BRACE_DIR="$(mktemp -d)"
 cat > "$BRACE_DIR/brace.mjs" <<'EOF'
-// Braces one-line if/for/while/else bodies in place, so the jht-skills brace
+// Braces one-line if/for/while/else bodies in place, so the brace
 // hook passes: `if (x) y;` becomes a three-line block, and the `else if` /
 // `else` lines that follow one join it as `} else if (…) {` / `} else {`.
 // Style only; behaviour is unchanged.   node brace.mjs FILE...
@@ -1970,7 +1970,7 @@ describe("topScore", () => {
 
 describe("queryWords", () => {
   test("lowercase words longer than two characters", () => {
-    assert.deepEqual([...queryWords("Fix the JUMP-1463 bug, ok?")], ["fix", "the", "jump", "1463", "bug"]);
+    assert.deepEqual([...queryWords("Fix the ABC-1463 bug, ok?")], ["fix", "the", "abc", "1463", "bug"]);
   });
 });
 
@@ -2115,7 +2115,7 @@ Replace the whole of `src/lib/relevance.js` with:
  * "zzz-nonexistent-term-qqq" finding "term". Measured on 214 logged searches
  * (2026-10-09), this agrees with the Lucene-era labels on 208. Five of the six
  * disagreements were Lucene calling a lone word "strong" just above its floor
- * ("JUMP-1463" matching only "jump"); the sixth was a Lucene "weak" whose best
+ * ("ABC-1463" matching only "abc"); the sixth was a Lucene "weak" whose best
  * result held 8 of its 9 words. bm25 scores cannot make the call: strong
  * matches scored from 3.47 and the weak one up to 10.84.
  */
