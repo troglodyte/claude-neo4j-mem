@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// LEGACY (Neo4j engine): reaches the old Neo4j graph only; kept until Neo4j is retired.
 // One-off: assigns Observation.subsystem to observations captured before
 // subsystem tagging existed. Without it the SessionStart map reads "(untagged)"
 // for everything and the feature it was built for does nothing on day one.

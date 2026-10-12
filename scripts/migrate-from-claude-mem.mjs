@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// LEGACY (Neo4j engine): reaches the old Neo4j graph only; kept until Neo4j is retired.
 // One-off migration: claude-mem's per-project SQLite DB -> this plugin's Neo4j graph.
 //
 // claude-mem models memory as flat observation/session_summary rows per project.

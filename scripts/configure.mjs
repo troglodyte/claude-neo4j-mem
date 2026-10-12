@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// LEGACY (Neo4j engine): reaches the old Neo4j graph only; kept until Neo4j is retired.
 // Interactive setup wizard. Meant to be run by hand in a terminal (never by Claude) since
 // it collects a database password. Supports non-interactive use via --flags for scripting/CI.
 import neo4j from "neo4j-driver";

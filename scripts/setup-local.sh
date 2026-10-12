@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# LEGACY (Neo4j engine): reaches the old Neo4j graph only; kept until Neo4j is retired.
 # One-command local setup: resolves a container engine (Podman preferred,
 # Docker fallback), generates docker/.env if missing, starts/waits for the
 # Neo4j container, then configures the plugin against it. Safe to re-run any

@@ -1,12 +1,21 @@
 # claude-neo4j — project notes
 
-Claude Code plugin (`neo4j-memory`) giving Claude persistent, graph-based
-memory backed by Neo4j. Architecture and usage: `README.md`. Per-release
+Claude Code plugin (`neo4j-memory`) giving Claude persistent memory in a
+local SQLite file (Neo4j until 0.7.0). Architecture and usage: `README.md`. Per-release
 detail: `CHANGELOG.md`. Portable cross-project guardrails: `AGENTS.md`
 (symlink). This file keeps only what those three, the code, and git history
 can't tell you — the traps.
 
-## Environment
+## Engine
+
+Since 0.7.0 the engine is SQLite: `~/.claude-neo4j/memory.sqlite`, opened through
+`src/lib/memoryStore.js` (which refuses to create a store while `src/lib/firstStart.js` says memory
+should be moving), schema in `src/lib/sqliteDb.js`, every process started by `bin/memory-node`.
+Neo4j survives only as the source of the first-start move and the 7-day catch-up
+(`src/lib/catchUp.js`). Everything below under "Legacy: Neo4j engine" describes the old engine
+and its container plumbing, kept until the graph is retired.
+
+## Legacy: Neo4j engine
 
 - **Local Neo4j runs on this machine** in a container named
   `claude-neo4j-memory` (bolt `7687`, http `7474`), created by
@@ -32,6 +41,92 @@ can't tell you — the traps.
   current is worse than no claim. Run `git status -sb` and `npm run usage`;
   they are always right.
 - Test and smoke-test data is deleted after verification, every time.
+
+- **Search queries are Lucene-escaped** (`escapeLuceneQuery` in `graph.js`).
+  Entity names like `feature:capture-visibility` otherwise parse as a field
+  separator plus a negation and match nothing — searching for an entity by its
+  own name returned zero hits. The trade is losing wildcard support.
+- **Podman and Docker are both supported; `scripts/lib-engine.sh` picks one.**
+  Podman **cannot see Docker's named volumes** — separate storage backends — so
+  switching engines moves data by dump/load, not by pointing at the same
+  volume. `CLAUDE_NEO4J_ENGINE` pins either.
+- **`resolve_engine` follows the container first, and only then prefers
+  Podman.** Naming the wrong engine never errors; it opens a different, usually
+  empty database, so a bare preference is the wrong shape of rule. Among
+  engines that are installed *and* whose `info` succeeds (usability is a hard
+  gate, checked before any container probe), it scores each: 2 for running
+  `claude-neo4j-memory`, 1 for having it stopped, 0 for not having it — highest
+  wins, `podman`-first loop order settling ties, and a 2 short-circuits the
+  loop so the common case never pays for the second engine's `info`.
+  **The preference therefore only ever decides a machine with no container on
+  either side.** A bare preference used to be the whole rule, and the moment
+  Podman was installed on this machine it moved every script onto a
+  nonexistent Podman container while Docker was serving the graph — that is
+  the bug the scoring exists to prevent, in either direction.
+- **The running/stopped distinction in `resolve_engine` is load-bearing.**
+  `migrate-to-podman.sh` **stops** the Docker container and keeps it for
+  rollback, so after a migration *both* engines have a container named
+  `claude-neo4j-memory` and presence alone cannot say which one holds the live
+  graph — scoring stopped below running is what does. It also makes rollback
+  just `docker start` with no `CLAUDE_NEO4J_ENGINE` to set or unset, which is
+  what the script's closing message now says.
+- **The two engines use different volume names, deliberately.** Docker's stay
+  `docker_claude_neo4j_data`/`_logs` — compose created them with its directory
+  as a prefix, and `setup-local.sh` must never rename them: doing so strands
+  the existing graph in a detached volume and yields a silently empty
+  database. Podman's are the plain `claude_neo4j_data`/`_logs` — it never went
+  through compose, and `migrate-to-podman.sh` creates them fresh under that
+  unprefixed name — so `setup-local.sh` selects the pair by `$ENGINE` rather
+  than sharing one hardcoded name across both.
+- **First Podman run on a machine that never migrated looks successful but
+  starts empty — and so does a Podman run after the migrated container was
+  removed.** Either way Podman finds no `claude_neo4j_data` volume and just
+  auto-creates a fresh, empty one with that name; the container comes up
+  healthy and nothing errors — the graph is just gone. `setup-local.sh` guards
+  the second case (container missing under `$ENGINE` but present under the
+  other engine) and refuses rather than create, but running it under Podman is
+  still not a substitute for `npm run migrate-to-podman` on a first migration;
+  only the latter actually moves the data across the boundary.
+- **Container healthcheck state lives at a different path per engine.**
+  `.State.Health.Status` vs `.State.Healthcheck.Status`, and a template
+  matching neither is an **error with a non-zero exit** — not the empty
+  string it might look like it'd return. An unguarded `inspect` of this shape
+  aborts the caller under `set -e` with no explanation the moment the first
+  guess misses; this already happened once. `container_health` in
+  `lib-engine.sh` tries both paths and guards **each** call with `|| true` —
+  any similar `inspect` call needs the same guard.
+- **Rootless Podman does not survive a reboot.** No daemon means `--restart`
+  only holds while the user's Podman session lives. `setup-local.sh` offers a
+  systemd user unit plus `loginctl enable-linger`; `check-health.sh` can only
+  report the unit is absent — it has no way to tell "declined" apart from
+  "never offered" or "install failed". This is the one behavioural regression
+  against Docker.
+- **Boot persistence is platform-shaped, and the mapping lives in one place.**
+  `boot_persistence_kind`/`_installed`/`_hint` in `lib-engine.sh` return
+  `docker` | `systemd` | `launchagent` | `none`; `setup-local.sh`,
+  `check-health.sh` and `migrate-to-podman.sh` all read it rather than each
+  restating a rule. They used to each restate the **Linux** rule, which is how
+  every one of them ended up telling macOS users to run `setup-local.sh` for
+  reboot survival when its systemd path returns early on Darwin and installs
+  nothing. `_installed` returns **2 for "nothing to install"**, distinct from
+  1 for "missing" — collapsing them nags Docker hosts about a systemd unit.
+- **On macOS the VM is the thing that doesn't come back, not the container.**
+  Podman runs it inside `podman-machine-default`, so `--restart unless-stopped`
+  never gets to fire until the VM is up and the fix after a reboot is always
+  `podman machine start` — never a re-run of `migrate-to-podman.sh` (refused by
+  the already-migrated guard) and never a re-`setup-local.sh` on its own. The
+  optional LaunchAgent runs at **login**, not boot: macOS has no user-level
+  pre-login start and no lingering equivalent, so this is not full parity with
+  systemd and the prompt says so. It also can't be detected by absence —
+  Podman Desktop's *Start Podman on login* does the same job invisibly, which
+  is why `check-health.sh` **warns** there instead of failing.
+- **A stopped `podman machine` reads as "no engine installed" unless checked
+  for.** `podman info` fails while the VM is down — the exact post-reboot
+  state — so `resolve_engine` fails and `setup-local.sh` used to announce "No
+  container engine found" and offer to `brew install` an already-present
+  podman. Both it and `migrate-to-podman.sh` now distinguish
+  installed-but-unusable and point at `podman machine start`
+  (`engine_hint podman`).
 
 ## Use `scripts/claude-with-memory.sh` to work on this repo
 
@@ -77,13 +172,13 @@ normal. Several ran that way before it was noticed.
 - `scripts/claude-with-memory.sh` — launch Claude Code with this plugin loaded.
 - `npm test` — `node --test` plus the guard that keeps `scripts/*.sh` from
   silently resolving the plugin directory to `/` (see above).
-- `scripts/setup-local.sh` — idempotent: starts the local container if needed,
+- `scripts/setup-local.sh` (legacy) — idempotent: starts the local container if needed,
   waits for health, and (re)runs the configure wizard against it.
-- `npm run configure` / `node scripts/configure.mjs --mode ... --uri ...` —
+- `npm run configure` (legacy) / `node scripts/configure.mjs --mode ... --uri ...` —
   reconfigure or switch between local/remote (e.g. Neo4j Aura) manually.
-- `scripts/check-health.sh` — verifies the whole stack end to end (container
+- `scripts/check-health.sh` (legacy) — verifies the whole stack end to end (container
   health, config, Neo4j auth, MCP handshake); prints PASS/FAIL per check.
-- `npm run usage` (or `scripts/memory-usage.sh`) — cross-project usage report:
+- `npm run usage` (legacy) (or `scripts/memory-usage.sh`) — cross-project usage report:
   every project in the db with entity/observation counts, first-seen, obs in
   last 7 days, last activity, plus totals and hygiene warnings (duplicate
   project names, oversized entities, empty stubs, expensive subsystem maps,
@@ -95,25 +190,21 @@ normal. Several ran that way before it was noticed.
   `~/.claude-neo4j/telemetry.jsonl`: read/write ratio per project, chars
   served, miss rate (empty *and* weak-match, see below), and the searches that
   found nothing. `--json` for raw, `--file PATH` to read another log.
-- `npm run backup` / `npm run restore -- --latest` — snapshot and reinstate the
-  whole database via `neo4j-admin database dump`/`load`, run in a sibling
-  container against the stopped container's volume (`--volumes-from`). Local
-  mode only; both stop and restart the container, via a trap that fires on
-  failure and Ctrl-C too. `--keep N` prunes old backups, `--info` inspects an
-  archive, restore requires typing the database name unless `--force`.
-  **Compression is deliberately off**: the `.dump` is already zstd-compressed,
-  and xz measured 0.9% on the real graph — `--xz` exists but is near-pointless.
-  Each backup gets a `.sha256` sidecar because `load --info` reads only the
-  archive header and passes a truncated dump as valid (verified). Shared
-  plumbing is in `scripts/lib-backup.sh`.
-- `scripts/cypher.sh "<query>"` — run arbitrary Cypher. Resolves credentials
+- `npm run backup [-- --keep N]` / `npm run restore -- --latest|<file> [--force]` /
+  `npm run health` — the SQLite store: an online `VACUUM INTO` copy to
+  `~/.claude-neo4j/backups/memory-<UTC stamp>.sqlite` (mode 0600; `--keep` prunes only
+  `memory-*.sqlite`); restore checks integrity, refuses while the store is open unless
+  `--force`, and moves the current store aside; health checks the launcher's Node, the
+  file, schema, integrity and the last migration. The Neo4j dump/load versions remain as
+  `scripts/backup.sh` / `scripts/restore.sh` (legacy), sharing `scripts/lib-backup.sh`.
+- `scripts/cypher.sh "<query>"` (legacy) — run arbitrary Cypher. Resolves credentials
   automatically and borrows `cypher-shell` from inside the container in local
   mode, so **no install is needed**; only remote-mode hosts need the binary.
 - `npm run memory -- <command>` (or `node scripts/memory-cli.mjs <command>`) —
   query/edit the graph from a terminal, outside a Claude session. Commands:
   `status`, `search`, `recent`, `get`, `add`, `relate`, `timeline`,
   `forget-obs`, `forget`. Run with no args for usage.
-- `npm run backfill-subsystems` — tag pre-existing observations.
+- `npm run backfill-subsystems` (legacy) — tag pre-existing observations.
 - `scripts/statusline.mjs` — shows `<model> · 🧠 <entities>e/<observations>o`,
   scoped to the current project. Wired via `statusLine` in
   `.claude/settings.local.json` (gitignored, personal), which is why it isn't
@@ -129,10 +220,6 @@ normal. Several ran that way before it was noticed.
   `graph.js` now keys off both, and by-name lookups prefer an exact-project
   match, falling back to a global/`project IS NULL` entity. Neo4j Community
   supports composite uniqueness constraints, just not `NODE KEY`.
-- **Search queries are Lucene-escaped** (`escapeLuceneQuery` in `graph.js`).
-  Entity names like `feature:capture-visibility` otherwise parse as a field
-  separator plus a negation and match nothing — searching for an entity by its
-  own name returned zero hits. The trade is losing wildcard support.
 - **Read paths are budgeted in characters, not rows** (`src/lib/budget.js`,
   applied in `graph.js`). Observation length varies 5x by source (claude-mem
   imports average 649 chars vs 122 for native capture), so row counts don't
@@ -260,87 +347,6 @@ normal. Several ran that way before it was noticed.
 - **Deliberately not built**: a custom web viewer (Neo4j Browser at
   `http://localhost:7474` already is one) and a background transcript-watcher
   daemon (the `PreCompact`/`SessionEnd` hooks already cover it).
-- **Podman and Docker are both supported; `scripts/lib-engine.sh` picks one.**
-  Podman **cannot see Docker's named volumes** — separate storage backends — so
-  switching engines moves data by dump/load, not by pointing at the same
-  volume. `CLAUDE_NEO4J_ENGINE` pins either.
-- **`resolve_engine` follows the container first, and only then prefers
-  Podman.** Naming the wrong engine never errors; it opens a different, usually
-  empty database, so a bare preference is the wrong shape of rule. Among
-  engines that are installed *and* whose `info` succeeds (usability is a hard
-  gate, checked before any container probe), it scores each: 2 for running
-  `claude-neo4j-memory`, 1 for having it stopped, 0 for not having it — highest
-  wins, `podman`-first loop order settling ties, and a 2 short-circuits the
-  loop so the common case never pays for the second engine's `info`.
-  **The preference therefore only ever decides a machine with no container on
-  either side.** A bare preference used to be the whole rule, and the moment
-  Podman was installed on this machine it moved every script onto a
-  nonexistent Podman container while Docker was serving the graph — that is
-  the bug the scoring exists to prevent, in either direction.
-- **The running/stopped distinction in `resolve_engine` is load-bearing.**
-  `migrate-to-podman.sh` **stops** the Docker container and keeps it for
-  rollback, so after a migration *both* engines have a container named
-  `claude-neo4j-memory` and presence alone cannot say which one holds the live
-  graph — scoring stopped below running is what does. It also makes rollback
-  just `docker start` with no `CLAUDE_NEO4J_ENGINE` to set or unset, which is
-  what the script's closing message now says.
-- **The two engines use different volume names, deliberately.** Docker's stay
-  `docker_claude_neo4j_data`/`_logs` — compose created them with its directory
-  as a prefix, and `setup-local.sh` must never rename them: doing so strands
-  the existing graph in a detached volume and yields a silently empty
-  database. Podman's are the plain `claude_neo4j_data`/`_logs` — it never went
-  through compose, and `migrate-to-podman.sh` creates them fresh under that
-  unprefixed name — so `setup-local.sh` selects the pair by `$ENGINE` rather
-  than sharing one hardcoded name across both.
-- **First Podman run on a machine that never migrated looks successful but
-  starts empty — and so does a Podman run after the migrated container was
-  removed.** Either way Podman finds no `claude_neo4j_data` volume and just
-  auto-creates a fresh, empty one with that name; the container comes up
-  healthy and nothing errors — the graph is just gone. `setup-local.sh` guards
-  the second case (container missing under `$ENGINE` but present under the
-  other engine) and refuses rather than create, but running it under Podman is
-  still not a substitute for `npm run migrate-to-podman` on a first migration;
-  only the latter actually moves the data across the boundary.
-- **Container healthcheck state lives at a different path per engine.**
-  `.State.Health.Status` vs `.State.Healthcheck.Status`, and a template
-  matching neither is an **error with a non-zero exit** — not the empty
-  string it might look like it'd return. An unguarded `inspect` of this shape
-  aborts the caller under `set -e` with no explanation the moment the first
-  guess misses; this already happened once. `container_health` in
-  `lib-engine.sh` tries both paths and guards **each** call with `|| true` —
-  any similar `inspect` call needs the same guard.
-- **Rootless Podman does not survive a reboot.** No daemon means `--restart`
-  only holds while the user's Podman session lives. `setup-local.sh` offers a
-  systemd user unit plus `loginctl enable-linger`; `check-health.sh` can only
-  report the unit is absent — it has no way to tell "declined" apart from
-  "never offered" or "install failed". This is the one behavioural regression
-  against Docker.
-- **Boot persistence is platform-shaped, and the mapping lives in one place.**
-  `boot_persistence_kind`/`_installed`/`_hint` in `lib-engine.sh` return
-  `docker` | `systemd` | `launchagent` | `none`; `setup-local.sh`,
-  `check-health.sh` and `migrate-to-podman.sh` all read it rather than each
-  restating a rule. They used to each restate the **Linux** rule, which is how
-  every one of them ended up telling macOS users to run `setup-local.sh` for
-  reboot survival when its systemd path returns early on Darwin and installs
-  nothing. `_installed` returns **2 for "nothing to install"**, distinct from
-  1 for "missing" — collapsing them nags Docker hosts about a systemd unit.
-- **On macOS the VM is the thing that doesn't come back, not the container.**
-  Podman runs it inside `podman-machine-default`, so `--restart unless-stopped`
-  never gets to fire until the VM is up and the fix after a reboot is always
-  `podman machine start` — never a re-run of `migrate-to-podman.sh` (refused by
-  the already-migrated guard) and never a re-`setup-local.sh` on its own. The
-  optional LaunchAgent runs at **login**, not boot: macOS has no user-level
-  pre-login start and no lingering equivalent, so this is not full parity with
-  systemd and the prompt says so. It also can't be detected by absence —
-  Podman Desktop's *Start Podman on login* does the same job invisibly, which
-  is why `check-health.sh` **warns** there instead of failing.
-- **A stopped `podman machine` reads as "no engine installed" unless checked
-  for.** `podman info` fails while the VM is down — the exact post-reboot
-  state — so `resolve_engine` fails and `setup-local.sh` used to announce "No
-  container engine found" and offer to `brew install` an already-present
-  podman. Both it and `migrate-to-podman.sh` now distinguish
-  installed-but-unusable and point at `podman machine start`
-  (`engine_hint podman`).
 
 ## Marketplace snapshots drift from the working tree
 

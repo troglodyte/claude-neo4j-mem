@@ -10,7 +10,7 @@
     {
       "name": "neo4j-memory",
       "source": ".",
-      "description": "Persistent, graph-based memory for Claude Code backed by Neo4j."
+      "description": "Persistent memory for Claude Code in a local SQLite file."
     }
   ]
 }

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# LEGACY (Neo4j engine): reaches the old Neo4j graph only; kept until Neo4j is retired.
 # Resolves which container engine to drive. Sourced, never executed.
 #
 # Both engines are fully supported -- every verb these scripts use (info,

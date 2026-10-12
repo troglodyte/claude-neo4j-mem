@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# LEGACY (Neo4j engine): reaches the old Neo4j graph only; kept until Neo4j is retired.
 # Runs arbitrary Cypher against the memory graph, without needing cypher-shell
 # installed on the host: in local mode it falls back to the copy that ships
 # inside the Neo4j container. Credentials come from env vars, then

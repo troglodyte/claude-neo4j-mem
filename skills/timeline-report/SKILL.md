@@ -1,6 +1,6 @@
 ---
 name: timeline-report
-description: Generate a narrative report of a project's development history from the Neo4j memory graph's chronological observation timeline. Use when asked for a timeline report, project history/journey narrative, or a digest of what's happened on this project.
+description: Generate a narrative report of a project's development history from the memory store's chronological observation timeline. Use when asked for a timeline report, project history/journey narrative, or a digest of what's happened on this project.
 ---
 
 Use the `memory_timeline` MCP tool to fetch the project's observation history in chronological order (oldest first). Pass `since` (ISO date) if the user asked for a specific window, e.g. "this week" or "since last month"; otherwise omit it for a first look at the full history.

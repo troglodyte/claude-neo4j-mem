@@ -6,6 +6,24 @@ Version numbers track `.claude-plugin/plugin.json` and `package.json`, which are
 kept in step deliberately: `claude plugin update` compares that string, so a
 release that doesn't move it never reaches any other project.
 
+## 0.7.0 — 2026-10-12
+
+- **Changed (breaking)**: the engine runs on SQLite (`~/.claude-neo4j/memory.sqlite`, via
+  `node:sqlite`) instead of Neo4j. No server or container is needed. On a machine with a Neo4j
+  config, the first session start moves the graph across by itself; memory is off for that
+  minute, and a failed check never becomes the live store. For 7 days after, session start also
+  copies what sessions still running 0.6 wrote to Neo4j. Rollback is installing 0.6.0: Neo4j is
+  only read.
+- **Added** `bin/memory-node`, which starts the MCP server and hooks under the first Node with
+  `node:sqlite` (22.13+, 23.4+, 24+): `CLAUDE_NEO4J_NODE`, `node` on PATH, nvm, fnm, volta,
+  Homebrew. With none, hooks show one line and the server fails visibly.
+- **Added** `npm run backup` (`VACUUM INTO`), `npm run restore -- --latest|<file>` (integrity
+  check, refuses while the store is open unless `--force`, moves the current store aside),
+  `npm run health`, and `npm run memory -- start-fresh`.
+- **Legacy (Neo4j only)**: `backup.sh`, `restore.sh`, `check-health.sh`, `setup-local.sh`,
+  `configure.mjs`, `migrate-to-podman.sh`, `cypher.sh`, `fingerprint.sh`, `memory-usage.sh`,
+  `backfill-subsystems.mjs`, `migrate-from-claude-mem.mjs`, and `docker/`.
+
 ## Unreleased
 
 - **Added** `npm run migrate-to-sqlite`, which copies the memory graph into

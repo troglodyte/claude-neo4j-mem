@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# LEGACY (Neo4j engine): reaches the old Neo4j graph only; kept until Neo4j is retired.
 # Usage report for the Neo4j memory graph: every project registered in the db
 # with its entity/observation counts and activity window, plus totals and a
 # few hygiene warnings. Reads the whole database, not just the current project.

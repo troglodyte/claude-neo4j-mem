@@ -1,231 +1,138 @@
 # neo4j-memory
 
-A Claude Code plugin that gives Claude persistent, graph-based memory — like
-[claude-mem](https://github.com/thedotmack/claude-mem), but backed by
-[Neo4j](https://neo4j.com/) instead of a local vector store. Facts, decisions,
-and preferences are stored as an entity/observation/relation graph, scoped per
-project (by git remote), and are recallable across sessions and machines.
+A Claude Code plugin that gives Claude persistent memory in a local SQLite file,
+`~/.claude-neo4j/memory.sqlite`, through Node's built-in `node:sqlite`: no server, no
+container, no embedding API. Facts, decisions and preferences are stored as entities,
+observations and relations, scoped per project (by git remote), and recalled across
+sessions. Session start injects the standing facts and a subsystem index, capture saves
+new facts at compaction and session end, and an MCP server exposes search and edit tools.
 
-Works against either:
+Despite the name, Neo4j is now only the place a machine's existing memory moves from,
+once. The plugin, its MCP server (`neo4j-memory`) and its folder (`~/.claude-neo4j`) keep
+their names so permission rules, tool references and config paths keep working.
 
-- **Local**: a Neo4j container run via Podman or Docker (default; both fully
-  supported — whichever one is already running the container wins, Podman
-  otherwise).
-- **Remote / web-based**: any hosted Neo4j reachable over `bolt`/`neo4j+s` — e.g.
-  [Neo4j Aura](https://neo4j.com/product/auradb/), or a self-hosted server on the
-  network. Only the connection URI and credentials change.
+## Requirements
+
+Node 22.13 or later in 22.x, 23.4 or later in 23.x, or any 24+, somewhere on the
+machine. It need not be the default `node`: every memory process starts through
+`bin/memory-node`, which uses the first suitable Node it finds, in this order:
+
+1. `CLAUDE_NEO4J_NODE`, if set.
+2. `node` on `PATH`.
+3. The newest under nvm, fnm and volta.
+4. Homebrew (`$HOMEBREW_PREFIX`, else `/opt/homebrew` and `/usr/local`).
+
+If none qualifies, session start shows one line naming the versions it found, and the
+memory server fails visibly instead of hanging.
+
+## Install
+
+```bash
+claude plugin marketplace add troglodyte/claude-neo4j-mem
+claude plugin install neo4j-memory@claude-neo4j-local --scope user
+```
+
+If the install path (`installPath` in `~/.claude/plugins/installed_plugins.json`) has
+no `node_modules`, run this in it. All three dependencies are public packages, so it
+works whatever registry `~/.npmrc` names:
+
+```bash
+npm install --omit=dev --registry=https://registry.npmjs.org/
+```
+
+## First start
+
+Session start decides what to do from the store file, the Neo4j settings and the last
+move's record:
+
+- **A store exists**: memory works as usual.
+- **No store and no Neo4j settings** (a new user): an empty store is created.
+- **No store, and Neo4j settings** (a password in `~/.claude-neo4j/config.json`, or
+  `NEO4J_PASSWORD`): session start moves the graph across in the background, which takes
+  about a minute. Meanwhile the memory tools answer "memory is moving to SQLite", and
+  captures wait for a later session start. The move builds `memory.sqlite.migrating`,
+  checks every row against Neo4j, and renames it into place only if the check passes.
+- **Neo4j settings, but Neo4j is down**: memory stays off. Start it once
+  (`scripts/setup-local.sh`) so the move can run, or run `npm run memory -- start-fresh`
+  to begin with an empty store and leave Neo4j untouched.
+- **The last move failed**: memory stays off, and session start names the reason and the
+  log, `~/.claude-neo4j/state/migrate.log`. The staged file and its report are kept.
+  Fix the cause, then run `npm run migrate-to-sqlite`.
+
+Sessions that were already open keep writing to Neo4j until they end. For 7 days after
+the move, each session start copies those new rows across in the background. It only
+ever inserts, so nothing deleted in SQLite comes back.
+
+## Moving a machine off Neo4j
+
+1. Leave Neo4j running and install the plugin (above).
+2. Start one Claude Code session. Wait until `~/.claude-neo4j/state/migrate.log` says
+   `memory moved`.
+3. In the install path, run `npm run health`. Every check should PASS, and `migration`
+   should read `last passed`.
+4. Run `npm run backup`.
+5. Optionally remove the rows a test run wrote into the graph on 2026-10-09:
+   `bash bin/memory-node scripts/remove-test-rows.mjs` lists them, and the same command
+   with `--apply` deletes them from SQLite. Neo4j is never touched.
+6. Once the sessions that were open have ended, or the 7 days are up, stop the
+   container. Run `podman stop claude-neo4j-memory`, or `docker stop claude-neo4j-memory`;
+   `podman update --restart=no claude-neo4j-memory` keeps it from coming back with the
+   Podman machine. Its volume is untouched.
 
 ## How it works
 
 - **`SessionStart` hook** injects a compact, fixed-cost snapshot of the current
-  project's memory: the standing facts that always apply (preferences and
-  constraints, quoted verbatim) followed by a one-line-per-subsystem index of
-  everything else — so Claude knows what exists and can `memory_search` into it
-  rather than being handed a recency dump. It also prints a short banner
-  (`🧠 Neo4j memory: 223 observation(s) across 6 subsystem(s) for <project>.`),
-  or, if the plugin isn't configured or Neo4j isn't reachable, one pointing at
-  `scripts/setup-local.sh` rather than failing silently.
+  project's memory: the standing facts that always apply (preferences and constraints,
+  quoted verbatim, with near-identical repeats collapsed) followed by a
+  one-line-per-subsystem index of everything else, so Claude knows what exists and can
+  `memory_search` into it rather than being handed a recency dump. It also prints a
+  short banner (`🧠 Memory: 223 observation(s) across 6 subsystem(s) for <project>.`).
 - **MCP server** (`neo4j-memory`) exposes eleven tools Claude can call mid-session:
   `memory_search`, `memory_get_entity`, `memory_recent`, `memory_timeline`,
   `memory_status`, `memory_list_projects`, `memory_add_observations`,
   `memory_create_relation`, `memory_delete_observations`, `memory_delete_entity`,
   `memory_prune`.
-  - Observations carry a **`subsystem` tag** (e.g. `capture`, `search`,
-    `backup`) inferred at write time. Cross-cutting facts — preferences,
-    project-wide constraints — carry none, because they reach Claude through
-    the standing-facts block rather than the index. `memory_search`,
-    `memory_recent`, and `memory_timeline` take an optional `subsystem` to
-    scope a read to one tag; `memory_add_observations` takes a call-level
-    `subsystem` to tag a batch.
-  - The five write tools return a `confirmation` string Claude relays as a short
-    line (`🧠 remembered 2 observation(s) on ...`) so mid-session writes aren't
-    silent. Mute with `npm run memory -- mute` (persistent) or
-    `CLAUDE_NEO4J_QUIET=1` (session-only); `unmute` reverses it.
-- **`PreCompact`/`SessionEnd` hooks** read the new part of the transcript since
-  the last capture and shell out to a locked-down, one-shot headless `claude -p`
-  call (Haiku, no tools, no MCP servers, no settings/CLAUDE.md inheritance,
-  structured output via `--json-schema`) to extract durable facts, then write
-  them into Neo4j — a backstop for anything Claude didn't explicitly save.
-  Because it runs through the `claude` CLI rather than the Anthropic SDK, it
-  rides your existing logged-in session instead of needing a separate
-  `ANTHROPIC_API_KEY`. The extraction prompt is seeded with the project's known
-  entity names and subsystem tags so it reuses them, and a lexical-similarity
-  check (`src/lib/dedup.js`) catches any that still drift (typos, `-` vs `:`).
-  See [Automatic capture](#automatic-capture) to tune or disable it.
-- **Nothing is silent.** `SessionEnd` capture runs detached and `PreCompact`'s
-  confirmation may not survive to be seen, so the next `SessionStart` banner
-  reports whatever background capture saved since your last session — and says
-  when it's retrying one that previously failed.
-- **Recall uses Neo4j's own full-text indexes and relationship traversal** — no
-  embedding API, no vector store, no per-search cost. `memory_search` ranking
-  blends full-text score with recency (roughly a 30-day half-life), so a stale
-  but lexically strong match doesn't always outrank something recent.
-- **`memory_prune`** / `npm run memory -- prune` deletes observations past a
-  given age (default 180 days), always keeping the most recent few per entity.
-  Dry run by default in both the CLI and the MCP tool. Nothing prunes
-  automatically.
+  - Observations carry a **`subsystem` tag** (e.g. `capture`, `search`, `backup`)
+    inferred at write time. Cross-cutting facts carry none, because they reach Claude
+    through the standing-facts block. `memory_search`, `memory_recent` and
+    `memory_timeline` take an optional `subsystem`; `memory_add_observations` takes a
+    call-level `subsystem` to tag a batch.
+  - Search results list each relation with its `direction`: `out` when the result is the
+    relation's start, `in` when it is the end, `self` when it is both.
+  - The five write tools return a `confirmation` string Claude relays as a short line
+    (`🧠 remembered 2 observation(s) on ...`). Mute with `npm run memory -- mute`
+    (persistent) or `CLAUDE_NEO4J_QUIET=1` (session-only); `unmute` reverses it.
+- **`PreCompact`/`SessionEnd` hooks** read the new part of the transcript since the last
+  capture and shell out to a locked-down, one-shot headless `claude -p` call (Haiku, no
+  tools, no MCP servers, no settings or CLAUDE.md inheritance, structured output via
+  `--json-schema`) to extract durable facts, then write them into the store. It rides
+  your logged-in session, so no `ANTHROPIC_API_KEY` is needed. The prompt is seeded with
+  the project's known entity names and subsystem tags, and a lexical-similarity check
+  (`src/lib/dedup.js`) catches names that still drift.
+- **Nothing is silent.** `SessionEnd` capture runs detached, so the next `SessionStart`
+  banner reports what background capture saved, and says when it is retrying one that
+  failed.
+- **Recall uses SQLite full-text search** (FTS5, bm25, Unicode word segmentation that
+  keeps `a:b`, `a.b` and `a_b` whole) blended with recency, `1 / (1 + days / 30)`. A
+  multi-word query whose best result holds only one of its words is marked weak.
+- **`memory_prune`** / `npm run memory -- prune` deletes observations past a given age
+  (default 180 days), always keeping the most recent few per entity. Dry run by default.
+  Nothing prunes automatically.
 
-All hook scripts fail open: if Neo4j is unreachable or unconfigured they log to
-stderr and exit 0 without blocking your session.
+All hook scripts fail open: if the store cannot be opened they say why and exit 0
+without blocking your session.
 
-### Graph model
+### Storage
 
-```
-(:Entity {name, type, project})
-(:Observation {id, text, subsystem, createdAt, sessionId})-[:ABOUT]->(:Entity)
-(:Entity)-[:RELATES_TO {type}]->(:Entity)
-(:Session {id, cwd, project})-[:PRODUCED]->(:Observation)
-```
-
-Entity identity is `(name, project)`, not `name` alone, so unrelated repos using
-the same entity name don't collide. `project` comes from
-`git remote get-url origin` (falling back to the cwd basename); a
-`project IS NULL` entity is treated as global and shows up everywhere.
-
-## Setup
-
-**Quick start (local):** `npm install && scripts/setup-local.sh` does
-everything below — resolves a container engine (whichever one already runs the
-container, else Podman, else Docker; offers to install Podman after an explicit
-prompt if neither is present), generates `docker/.env` with a random password
-if missing, starts the container, waits for health, and configures the plugin
-against it. Safe to re-run any time. `CLAUDE_NEO4J_ENGINE=docker` (or
-`podman`) pins one explicitly instead of relying on that. Without a container
-engine, use the remote/Aura path in step 2.
-
-### 1. Install dependencies
-
-```bash
-npm install
-```
-
-### 2. Start Neo4j
-
-**Local (Podman or Docker):**
-
-```bash
-cd docker
-cp .env.example .env
-# edit .env and set a real NEO4J_PASSWORD
-cd ..
-scripts/setup-local.sh
-```
-
-`scripts/setup-local.sh` resolves the engine — see
-[Choosing an engine](#choosing-an-engine) — and creates the container with a
-plain `$ENGINE run` (there's no compose file to run). If neither engine is
-present it offers to install Podman, but only after an explicit prompt; a
-non-interactive run refuses rather than assume consent.
-`CLAUDE_NEO4J_ENGINE=docker` (or `podman`) pins one explicitly.
-
-### Choosing an engine
-
-Podman and Docker cannot see each other's named volumes, so naming the wrong
-one doesn't fail — it silently opens a *different*, usually empty database.
-The resolver therefore follows the data first, and only then a preference:
-
-1. `CLAUDE_NEO4J_ENGINE`, if set, always wins.
-2. Otherwise, among engines that are installed and whose `info` succeeds,
-   whichever is **running** `claude-neo4j-memory` — then whichever merely
-   **has** it stopped.
-3. If that settles nothing (a fresh machine, neither engine has the
-   container), **Podman**, then Docker.
-
-Podman is preferred where there's a free choice — daemonless, rootless, no
-licensing — and Docker is a fully supported fallback wherever Podman isn't
-installed or isn't usable. Step 2 is what keeps that preference from
-disturbing anyone: an existing Docker install stays on Docker even after
-Podman appears on the machine, because Docker is the engine holding the
-container. Moving an existing graph across is `npm run migrate-to-podman`;
-nothing else copies data between engines.
-
-**Remote (e.g. Aura):** create an instance at
-[console.neo4j.io](https://console.neo4j.io) and note its `neo4j+s://...` URI,
-username, and password. No local container needed.
-
-### Surviving a reboot
-
-Nothing errors when the container is down — the session just starts with no
-memory — so this is worth setting up once. What does the job depends on both
-the engine and the platform, and `setup-local.sh` offers whichever applies:
-
-| | mechanism | if memory is offline after a reboot |
-| --- | --- | --- |
-| **Docker** | the daemon's own restart policy | `docker start claude-neo4j-memory` |
-| **Podman on Linux** | a systemd **user** unit plus `loginctl enable-linger` | `systemctl --user start claude-neo4j.service` |
-| **Podman on macOS** | a **login agent** running `podman machine start` | `podman machine start` |
-
-Rootless Podman has no daemon, so `--restart unless-stopped` only holds while
-your Podman session lives — that's what the systemd unit replaces on Linux.
-
-On macOS the container runs inside the `podman-machine-default` VM, and that
-VM does not come back on its own, so the restart policy never gets the chance
-to fire. `setup-local.sh` offers a LaunchAgent
-(`~/Library/LaunchAgents/com.claude-neo4j.podman-machine.plist`) that runs
-`podman machine start` — at **login**, not at boot, since macOS has no
-user-level pre-login start and no equivalent of lingering. Podman Desktop's
-*Start Podman on login* setting does the same job; skip the agent if that's
-already on. Remove the agent with:
-
-```bash
-launchctl bootout gui/$(id -u)/com.claude-neo4j.podman-machine
-rm ~/Library/LaunchAgents/com.claude-neo4j.podman-machine.plist
-```
-
-`scripts/check-health.sh` reports the state of whichever mechanism applies. On
-macOS a missing agent is a warning rather than a failure: Podman Desktop's
-setting leaves no trace the script can detect, so its absence means *unknown*,
-not *broken*.
-
-### 3. Configure the plugin
-
-Run this yourself in a terminal (not via Claude — it collects a password):
-
-```bash
-npm run configure
-```
-
-It prompts for local vs. remote, tests connectivity, and saves to
-`~/.claude-neo4j/config.json` (mode 0600). Skip the prompts with flags:
-
-```bash
-node scripts/configure.mjs --mode remote \
-  --uri neo4j+s://xxxxx.databases.neo4j.io \
-  --username neo4j --password '...' --database neo4j
-```
-
-Resolution order at runtime: env vars (`NEO4J_URI`, `NEO4J_USERNAME`,
-`NEO4J_PASSWORD`, `NEO4J_DATABASE`) > `~/.claude-neo4j/config.json` > local
-container defaults. Env vars are handy for pointing one session at a different
-database without touching the saved config.
-
-> **`docker/.env` and `~/.claude-neo4j/config.json` are two separate files,
-> synced once at setup time and never linked at runtime.** `docker/.env` only
-> feeds container creation — `scripts/setup-local.sh` sources it directly and
-> passes `NEO4J_USERNAME`/`NEO4J_PASSWORD`/`NEO4J_HTTP_PORT`/`NEO4J_BOLT_PORT`
-> to `$ENGINE run` (Podman or Docker). `~/.claude-neo4j/config.json` is what
-> Claude actually reads (via `src/lib/config.js`), populated by copying those
-> same values out once. **Change the password in `docker/.env` later and
-> Claude won't pick it up** — re-run `npm run configure` or
-> `scripts/setup-local.sh`.
-
-### 4. Load the plugin
-
-```bash
-scripts/claude-with-memory.sh
-```
-
-This wraps `claude --plugin-dir /path/to/claude-neo4j` so you don't have to
-remember the path; extra args pass through, e.g.
-`scripts/claude-with-memory.sh -p "..."`. Run `/reload-plugins` in-session after
-changing plugin code.
-
-`scripts/setup-local.sh` collapses steps 2–3 for local mode into one command.
+Tables `entities`, `observations`, `relations`, `sessions` and `migrations`, plus two
+FTS5 tables, in `src/lib/sqliteDb.js`. Entity identity is `(name, project)`, so unrelated
+repos using the same entity name don't collide. `project` comes from
+`git remote get-url origin` (falling back to the cwd basename); an entity with project
+`''` is global and shows up everywhere.
 
 ## Automatic capture
 
-On by default. It uses the `claude` CLI already on your PATH (your logged-in
-session — no separate API key) and Claude Haiku.
+On by default. It uses the `claude` CLI already on your PATH and Claude Haiku.
 
 | variable | effect |
 | --- | --- |
@@ -235,152 +142,112 @@ session — no separate API key) and Claude Haiku.
 | `CLAUDE_NEO4J_CAPTURE_WINDOW` | characters of new transcript per window (default 50,000) |
 | `CLAUDE_NEO4J_CAPTURE_MAX_CHUNKS` | windows per capture (default 3) |
 
-Windows are taken from the end, so a session past the ceiling loses its oldest
-content rather than its most recent, and `~/.claude-neo4j/capture.log` records
-how much was dropped. Raise either to trade tokens for coverage.
+Windows are taken from the end, so a session past the ceiling loses its oldest content
+rather than its most recent, and `~/.claude-neo4j/capture.log` records how much was
+dropped.
 
-A capture that fails (Neo4j restarting, a timed-out extraction) keeps its input
-and retries at the next session start, up to 3 attempts — transcripts stay on
-disk, so a capture that failed days ago still works when it finally runs.
+A capture that fails (memory moving to SQLite, a timed-out extraction) keeps its input
+and retries at the next session start, up to 3 attempts.
 
 ## Usage
 
-- "What do you remember about X" — uses the `memory-search` skill / `memory_search`.
-- "Is memory working?" / "what's my memory status" — `memory-status` / `memory_status`.
-- "Give me a timeline report" / "journey into this project" — the
-  `timeline-report` skill / `memory_timeline`, narrating the project's history.
-- Tell Claude to forget something — `memory_delete_entity` /
-  `memory_delete_observations`.
+- "What do you remember about X": the `memory-search` skill / `memory_search`.
+- "Is memory working?": `memory-status` / `memory_status`.
+- "Give me a timeline report": the `timeline-report` skill / `memory_timeline`.
+- Tell Claude to forget something: `memory_delete_entity` / `memory_delete_observations`.
 
 ### Outside a Claude session
 
-- `npm run memory -- status` (or `search`, `recent`, `get`, `add`, `relate`,
-  `timeline`, `forget-obs`, `forget`, `prune`, `projects`, `mute`, `unmute`) —
-  query and edit the graph from a terminal. Run with no args for full usage.
-- `scripts/check-health.sh` — container health, plugin config, Neo4j auth, and
-  the MCP handshake in one shot, PASS/FAIL per check.
-- `npm run usage` — every project in the database with entity/observation
-  counts, first-seen, observations in the last 7 days, and last activity,
-  followed by totals and hygiene warnings (a project recorded under two names,
-  entities hoarding 100+ observations, empty stubs, subsystem maps too
-  fragmented to inject cheaply). `--quiet` for just the table.
-- `npm run token-cost [-- --all]` — see [Token cost](#token-cost).
-- `npm run telemetry [-- --days N]` — how the memory is *used*, as opposed to
-  what it holds: read/write counts and their ratio per project, characters
-  served, the share of lookups that missed, and the individual searches that
-  found nothing. `--json` for the raw summary, `--days N` to window it.
-  Reads `~/.claude-neo4j/telemetry.jsonl`, written by the MCP tools
-  themselves; opt out with `CLAUDE_NEO4J_DISABLE_TELEMETRY=1`.
-- `npm run backfill-subsystems` — tags observations predating subsystem
-  tagging. Idempotent and resumable (selects `subsystem IS NULL`, writes per
-  batch), and processes entities largest-first per project so the vocabulary
-  early batches establish is what later ones reuse. `--dry-run` previews;
-  `--project` scopes to one project; `--retag TAG` reclassifies observations
-  already carrying a tag, which is how a catch-all gets emptied.
-- `scripts/cypher.sh "<query>"` — arbitrary Cypher with no install needed. See
-  the [Cypher cheatsheet](docs/cypher-cheatsheet.md).
-- `scripts/statusline.mjs` — a statusline showing
-  `<model> · 🧠 <entities>e/<observations>o`, wired via
-  `.claude/settings.local.json`.
-- The graph is browsable directly in Neo4j Browser at `http://localhost:7474`
-  (local mode) — no custom viewer needed.
+- `npm run memory -- status` (or `search`, `recent`, `get`, `add`, `relate`, `timeline`,
+  `forget-obs`, `forget`, `prune`, `projects`, `dupes`, `start-fresh`, `mute`, `unmute`):
+  query and edit the store from a terminal. Run with no arguments for usage.
+  `dupes [--min 0.3]` lists likely repeated standing facts, most similar first.
+- `npm run health`: the launcher's Node, the store file, its schema and integrity, its
+  contents and the last migration, PASS/FAIL per check.
+- `npm run token-cost [-- --all]`: see [Token cost](#token-cost).
+- `npm run telemetry [-- --days N]`: how memory is used: reads and writes per project,
+  characters served, misses, and the searches that found nothing. Reads
+  `~/.claude-neo4j/telemetry.jsonl`; opt out with `CLAUDE_NEO4J_DISABLE_TELEMETRY=1`.
+- `npm run search-parity`: replays logged searches through Neo4j and through a fresh
+  copy in SQLite, and reports how often they agree. Needs Neo4j running.
+- `scripts/statusline.mjs`: a statusline showing `<model> · 🧠 <entities>e/<observations>o`.
 
 ### Token cost
 
-Reads are bounded by a character budget, not just a row count — see
-`src/lib/budget.js`. Observation length varies by source (bulk-imported history
-runs ~5x longer than natively-captured observations), so a row limit alone makes
-a call's cost unpredictable. Trimmed content is always marked in-band
-(`…[+N chars]`), and `memory_timeline` returns `{events, total, returned,
-truncated}` so a partial history is never mistaken for a complete one.
+Reads are bounded by a character budget, not just a row count (`src/lib/budget.js`).
+Trimmed content is marked in-band (`…[+N chars]`), and `memory_timeline` returns
+`{events, total, returned, truncated}` so a partial history is never mistaken for a
+complete one. `npm run token-cost [-- --all]` measures every read path and exits non-zero
+if one exceeds its per-call ceiling.
 
-`npm run token-cost [-- --all]` measures every read path and exits non-zero if
-one exceeds its per-call ceiling. Run it after changing anything that shapes a
-read payload:
+## Backup, restore, health
 
-```
-PATH                        CHARS  ~TOKENS  STATUS  NOTE
-SessionStart injection       2887      722  ok       per session, always
-memory_timeline             20628     5157  ok       default limit
+```bash
+npm run backup                         # online copy to ~/.claude-neo4j/backups/memory-<UTC stamp>.sqlite
+npm run backup -- --keep 7             # then keep only the 7 newest memory-*.sqlite backups
+npm run restore -- --latest            # put the newest backup back (or: npm run restore -- <file>)
+npm run health                         # PASS/FAIL per check
 ```
 
-## Backup and restore
+A backup is an online `VACUUM INTO`, safe while sessions write, readable only by you
+(mode 0600). Restore checks the backup's integrity first, refuses while any process has
+the store open (close your Claude Code sessions, or pass `--force`), and moves the
+current store aside to `memory.sqlite.pre-restore-<stamp>` rather than deleting it.
 
-The memory graph lives in a container volume (Podman or Docker), so it is the
-only copy of everything the plugin has learned. `npm run backup` snapshots it;
-`npm run restore` puts it back.
+## Legacy: Neo4j
 
+These reach the old Neo4j graph and stay until it is retired: `scripts/setup-local.sh`
+and `npm run configure` (start and configure the container), `scripts/backup.sh`,
+`scripts/restore.sh` and `scripts/check-health.sh` (Neo4j dumps and checks),
+`npm run migrate-to-podman`, `scripts/cypher.sh`, `scripts/fingerprint.sh`,
+`npm run usage`, `npm run backfill-subsystems`, `npm run migrate-claude-mem`, and
+`docker/`. The container is `claude-neo4j-memory`, under Podman or Docker. Its
+credentials live in `docker/.env` and the Neo4j fields of `~/.claude-neo4j/config.json`.
+The full Neo4j setup guide is in this README as of 0.6.0, in git history.
+
+## Development
+
+`scripts/claude-with-memory.sh` starts Claude Code with the plugin loaded from this
+checkout (`claude --plugin-dir`); run `/reload-plugins` after changing plugin code.
+
+```bash
+env -u CLAUDE_NEO4J_DISABLE_CAPTURE HOME="$(mktemp -d)" npm test
 ```
-npm run backup                  # -> ~/.claude-neo4j/backups/neo4j-<timestamp>.dump
-npm run backup -- --keep 7      # afterwards, keep only the 7 newest
-npm run backup -- --list        # show existing backups
 
-npm run restore -- --latest     # restore the newest backup
-npm run restore -- --info FILE  # inspect an archive without restoring
-```
-
-Both use Neo4j's official `neo4j-admin database dump`/`load`, which capture the
-whole store — indexes and constraints included, not just the entities and
-observations the plugin models. That format cannot operate on a mounted
-database, so each script stops the container and restarts it afterwards
-**including when the dump fails or you interrupt it**. A backup takes ~13
-seconds.
-
-Restoring replaces the database. Before anything is touched, `restore.sh`
-verifies the archive's checksum, prints its metadata alongside the current
-entity and observation counts, and requires you to type the database name
-(`neo4j`) to confirm; `--force` skips the prompt. Afterwards it prints the
-restored counts, so a round trip is verified rather than assumed.
-
-Two limitations worth knowing:
-
-- **Local mode only.** A dump reads store files, so it cannot reach Aura. Use
-  the provider's own snapshots for a remote database.
-- **Compression is off by default.** The `.dump` format is already
-  zstd-compressed internally: on a real 78-entity/1187-observation graph, `xz`
-  took 898KB down to 890KB — 0.9%. `--xz` exists for when you're shipping the
-  archive somewhere that charges by the byte, and `restore.sh` detects
-  compressed input by content rather than by extension.
-
-Each backup gets a `.sha256` sidecar. This is not decoration: `neo4j-admin load
---info` parses only the archive header and will report a truncated dump as
-complete, so the sidecar is the only thing standing between a partial archive
-and a half-finished load over a database that has already been overwritten.
+The temporary `HOME` keeps tests away from your real store and settings, and the `env -u`
+matters if capture is switched off in your settings, which would fail the capture tests.
+On macOS, `engine-resolve.test.sh`'s pty case fails because it needs util-linux
+`script -qec`.
 
 ## Project layout
 
-```
-.claude-plugin/plugin.json     plugin manifest
-hooks/hooks.json               SessionStart / PreCompact / SessionEnd wiring
-.mcp.json                      bundled MCP server registration
-skills/                        memory-search, memory-status, timeline-report
-src/mcp/server.js              MCP tools
-src/hooks/                     session-start.js, capture.js
-src/lib/                       config, Neo4j client, schema, graph ops, project detection,
-                                 read budgets, SessionStart injection, subsystem tags,
-                                 entity-name dedup, extraction, capture digest
-docker/                        .env / .env.example — local Neo4j credentials
-                                 (no compose file; setup-local.sh runs the
-                                 container directly)
-scripts/                       setup, configure, health check, CLI, statusline,
-                                 backup/restore, cypher, usage, backfill,
-                                 claude-mem migration, engine resolution,
-                                 Docker->Podman migration
-tests/                         node --test suites + the launcher-path guard
-docs/                          cypher cheatsheet, design specs
-CLAUDE.md                      traps and conventions for working on this repo
-CHANGELOG.md                   per-release detail
+```text
+.claude-plugin/          plugin and marketplace manifests
+bin/memory-node          launcher: finds a Node with node:sqlite for every memory process
+hooks/hooks.json         SessionStart / PreCompact / SessionEnd wiring
+.mcp.json                MCP server registration
+skills/                  memory-search, memory-status, timeline-report
+src/mcp/server.js        MCP tools
+src/hooks/               session-start.js, capture.js
+src/lib/                 config, memoryStore (+ firstStart), sqliteDb (schema), graph, search,
+                         segment, budgets, injection, subsystem tags, dedup, extraction,
+                         catchUp, backup, health, migrate/ (Neo4j to SQLite)
+scripts/                 memory CLI, migrate-to-sqlite, first-start-migrate, catch-up,
+                         backup / restore / check-health (.mjs), statusline, token-cost,
+                         telemetry, search-parity, remove-test-rows, legacy Neo4j scripts
+docker/                  legacy: local Neo4j credentials
+tests/                   node --test suites and bash suites
+docs/                    design specs and plans
 ```
 
 ## Notes
 
-- `docker/.env` and `~/.claude-neo4j/config.json` hold credentials — never
-  commit either (the former is gitignored; the latter lives outside the repo).
-- Switching between local and remote is just `npm run configure` again, or
-  setting `NEO4J_URI`/`NEO4J_USERNAME`/`NEO4J_PASSWORD` — no code changes.
-- Marketplace installs compare the `version` in `.claude-plugin/plugin.json`, so
-  a release that doesn't move it never reaches other projects. See `CLAUDE.md`
-  for the snapshot-drift notes.
+- `~/.claude-neo4j/config.json` and `docker/.env` can hold the Neo4j password; never
+  commit either.
+- `memory.sqlite` is the only copy of what the plugin has learned since the move; back
+  it up.
+- Marketplace installs compare the `version` in `.claude-plugin/plugin.json`, so a release
+  that doesn't move it never reaches other machines. See `CLAUDE.md`.
 
 ## Changelog
 

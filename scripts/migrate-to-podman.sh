@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# LEGACY (Neo4j engine): reaches the old Neo4j graph only; kept until Neo4j is retired.
 # One-shot Docker -> Podman migration for the local memory graph.
 #
 # Podman cannot see Docker's named volumes (separate storage backends), so the

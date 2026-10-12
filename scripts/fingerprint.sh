@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# LEGACY (Neo4j engine): reaches the old Neo4j graph only; kept until Neo4j is retired.
 # Prints a content fingerprint of the graph inside a running container, so the
 # same graph can be compared across engines. Counts alone can match while the
 # content differs, so every count is paired with a hash of the sorted content.
