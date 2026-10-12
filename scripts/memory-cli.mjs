@@ -1,17 +1,17 @@
 #!/usr/bin/env node
-// Terminal access to the Neo4j memory graph, outside of a Claude Code session.
+// Terminal access to the memory store, outside of a Claude Code session.
 // Usage: node scripts/memory-cli.mjs <command> [args...] [--project NAME]
-import { ensureSchema } from "../src/lib/schema.js";
 import * as graph from "../src/lib/graph.js";
+import { formatDupes } from "../src/lib/dupesReport.js";
 import { detectProject } from "../src/lib/project.js";
-import { closeDriver } from "../src/lib/neo4jClient.js";
-import { loadConnectionConfig, shouldNotifyOnWrite, setNotifyOnWrite } from "../src/lib/config.js";
+import { getDb, closeDb, storeStatus } from "../src/lib/memoryStore.js";
+import { shouldNotifyOnWrite, setNotifyOnWrite } from "../src/lib/config.js";
 
 function usage() {
   console.error(`Usage: memory-cli.mjs <command> [args...] [--project NAME]
 
 Commands:
-  status                              connection info + entity/observation counts
+  status                              where memory is stored + entity/observation counts
   projects                             list every project tracked in the db (across all projects, not scoped to cwd)
   search <query> [--limit N]          full-text search entities/observations
   recent [--limit N]                  most recently updated entities
@@ -24,6 +24,7 @@ Commands:
   prune [--older-than-days N] [--keep-per-entity N] [--dry-run]
                                        delete observations older than N days (default 180),
                                        keeping the most recent N per entity (default 3) regardless of age
+  dupes [--min N]                     list likely repeated standing facts (default min 0.3) to merge or delete
   mute                                 stop relaying "remembered ..."/"forgot ..." confirmations mid-session
   unmute                               resume relaying write confirmations (default)
 
@@ -50,7 +51,9 @@ function parseFlags(args, flagSpecs) {
 
 function printEntity(e) {
   console.log(`\n${e.name}${e.type ? ` (${e.type})` : ""}`);
-  if (e.score !== undefined) console.log(`  score: ${e.score.toFixed(3)}`);
+  if (e.score !== undefined) {
+    console.log(`  score: ${e.score.toFixed(3)}`);
+  }
   for (const o of e.observations ?? []) {
     // search/recent return {text, subsystem}; get-entity adds id and createdAt.
     if (typeof o === "string") {
@@ -75,7 +78,9 @@ function printEntity(e) {
 
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
-  if (!command) usage();
+  if (!command) {
+    usage();
+  }
 
   const { rest: args, flags } = parseFlags(rest, {
     project: true,
@@ -85,60 +90,79 @@ async function main() {
     "older-than-days": true,
     "keep-per-entity": true,
     "dry-run": "boolean",
+    min: true,
   });
   const project = flags.project ?? detectProject(process.cwd());
   const limit = flags.limit ? Number(flags.limit) : undefined;
 
-  await ensureSchema();
+  getDb();
 
   switch (command) {
     case "status": {
-      const { uri, database, mode } = loadConnectionConfig();
       const counts = await graph.getStatus({ project });
-      console.log(JSON.stringify({ uri, database, mode, project, ...counts }, null, 2));
+      console.log(JSON.stringify({ engine: "sqlite", path: storeStatus().path, project, ...counts }, null, 2));
       break;
     }
     case "projects": {
       const projects = await graph.listProjects();
-      if (projects.length === 0) console.log("No projects tracked yet.");
+      if (projects.length === 0) {
+        console.log("No projects tracked yet.");
+      }
       for (const p of projects) {
         console.log(`${p.project}  (${p.entityCount} entit${p.entityCount === 1 ? "y" : "ies"}, ${p.observationCount} observation(s), last activity ${p.lastActivity ?? "n/a"})`);
       }
       break;
     }
     case "search": {
-      if (args.length === 0) usage();
+      if (args.length === 0) {
+        usage();
+      }
       const { results, note } = await graph.searchMemory(args.join(" "), limit ?? 10, project);
-      if (results.length === 0) console.log("No matches.");
+      if (results.length === 0) {
+        console.log("No matches.");
+      }
       results.forEach(printEntity);
       // Surfaced here too: a terminal user reading five plausible rows has the
       // same problem the model does, and no score to calibrate against.
-      if (note && results.length) console.log(`\n⚠ ${note}`);
+      if (note && results.length) {
+        console.log(`\n⚠ ${note}`);
+      }
       break;
     }
     case "recent": {
       const results = await graph.getRecentContext({ project, limit: limit ?? 15 });
-      if (results.length === 0) console.log("No entities yet.");
+      if (results.length === 0) {
+        console.log("No entities yet.");
+      }
       results.forEach(printEntity);
       break;
     }
     case "get": {
-      if (args.length === 0) usage();
+      if (args.length === 0) {
+        usage();
+      }
       const entity = await graph.getEntity(args.join(" "), project);
-      if (!entity) console.log(`No entity named "${args.join(" ")}"`);
-      else printEntity(entity);
+      if (!entity) {
+        console.log(`No entity named "${args.join(" ")}"`);
+      } else {
+        printEntity(entity);
+      }
       break;
     }
     case "add": {
       const [entity, ...observations] = args;
-      if (!entity || observations.length === 0) usage();
+      if (!entity || observations.length === 0) {
+        usage();
+      }
       const ids = await graph.addObservations({ entity, entityType: flags.type, observations, project });
       console.log(`Added ${ids.length} observation(s) to "${entity}": ${ids.join(", ")}`);
       break;
     }
     case "relate": {
       const [from, type, to] = args;
-      if (!from || !type || !to) usage();
+      if (!from || !type || !to) {
+        usage();
+      }
       await graph.createRelation({ from, to, type, project });
       console.log(`${from} -[${type}]-> ${to}`);
       break;
@@ -149,7 +173,9 @@ async function main() {
         since: flags.since,
         limit: limit ?? 100,
       });
-      if (events.length === 0) console.log("No timeline events.");
+      if (events.length === 0) {
+        console.log("No timeline events.");
+      }
       for (const e of events) {
         console.log(`${e.createdAt}  ${e.entity}${e.type ? ` (${e.type})` : ""}: ${e.text}`);
       }
@@ -162,14 +188,18 @@ async function main() {
     }
     case "forget-obs": {
       const [entity, ...ids] = args;
-      if (!entity || ids.length === 0) usage();
+      if (!entity || ids.length === 0) {
+        usage();
+      }
       const deleted = await graph.deleteObservations(entity, ids, project);
       console.log(`Deleted ${deleted} observation(s) from "${entity}".`);
       break;
     }
     case "forget": {
       const [entity] = args;
-      if (!entity) usage();
+      if (!entity) {
+        usage();
+      }
       await graph.deleteEntity(entity, project);
       console.log(`Deleted entity "${entity}" and its observations/relations.`);
       break;
@@ -183,7 +213,14 @@ async function main() {
         `${dryRun ? "[dry-run] " : ""}${pruned} observation(s) older than ${olderThanDays} day(s) ` +
           `(keeping ${keepPerEntity} most recent per entity)${dryRun ? " would be deleted" : " deleted"}.`
       );
-      for (const o of sample) console.log(`  - [${o.id}] ${o.text}`);
+      for (const o of sample) {
+        console.log(`  - [${o.id}] ${o.text}`);
+      }
+      break;
+    }
+    case "dupes": {
+      const pairs = await graph.findRepeatedFacts({ project, min: flags.min ? Number(flags.min) : undefined });
+      console.log(formatDupes(pairs));
       break;
     }
     case "mute": {
@@ -206,4 +243,4 @@ main()
     console.error(`Error: ${error.message}`);
     process.exitCode = 1;
   })
-  .finally(() => closeDriver());
+  .finally(() => closeDb());

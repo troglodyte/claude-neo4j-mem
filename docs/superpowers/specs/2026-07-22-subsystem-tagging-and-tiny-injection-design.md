@@ -133,7 +133,7 @@ the same reason as `getTimeline`.
 Replaces the recency dump at `src/hooks/session-start.js:83-92`:
 
 ```
-## Memory (Neo4j · github.com/troglodyte/claude-neo4j-mem)
+## Memory (Neo4j · example.com/acme/claude-neo4j-mem)
 
 Always applies:
 - bound every read path by characters, not row count

@@ -26,7 +26,9 @@ let connectionCache;
  * Env vars let per-project .mcp.json / CI overrides win without touching the shared file.
  */
 export function loadConnectionConfig() {
-  if (connectionCache) return connectionCache;
+  if (connectionCache) {
+    return connectionCache;
+  }
   const fileConfig = readConfigFile() ?? {};
 
   const uri = process.env.NEO4J_URI ?? fileConfig.uri ?? "bolt://localhost:7687";
@@ -51,7 +53,9 @@ export function loadConnectionConfig() {
  * or the config file (persistent, `npm run memory -- mute`/`unmute`).
  */
 export function shouldNotifyOnWrite() {
-  if (process.env.CLAUDE_NEO4J_QUIET === "1") return false;
+  if (process.env.CLAUDE_NEO4J_QUIET === "1") {
+    return false;
+  }
   const fileConfig = readConfigFile() ?? {};
   return fileConfig.notifyOnWrite !== false;
 }
@@ -79,4 +83,12 @@ export function writeConfigFile(config) {
 export function ensureStateDir() {
   fs.mkdirSync(STATE_DIR, { recursive: true });
   return STATE_DIR;
+}
+
+/**
+ * Where the SQLite memory store lives: CLAUDE_NEO4J_SQLITE, then config.json's
+ * sqlitePath, then ~/.claude-neo4j/memory.sqlite.
+ */
+export function memoryDbPath() {
+  return process.env.CLAUDE_NEO4J_SQLITE ?? readConfigFile()?.sqlitePath ?? path.join(CONFIG_DIR, "memory.sqlite");
 }

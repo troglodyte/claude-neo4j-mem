@@ -2,7 +2,8 @@
 
 **Component:** `claude-neo4j-memory` (plugin `neo4j-memory@claude-neo4j-local`)
 **Version observed:** 0.5.0 (cache also holds 0.3.1, 0.4.0, 0.4.1, 0.4.2)
-**Reported from:** project `bitbucket.org/jhtna/jump-authorization-server` — 112 entities, 387 observations
+**Reported from:** another project in the same graph — 112 entities, 387 observations (identifiers
+below are anonymized; the counts and tag distribution are the real measurements)
 **Priority:** low/medium — no data at risk; this is an observability and API-consistency gap
 
 ---
@@ -29,14 +30,14 @@ SessionStart map advertises a bucket the API rejects.
 **Consequence:** tagging is write-only from the agent's perspective. To answer "what subsystem is
 this observation in?" the only method is to call a read once per candidate tag and diff the
 result sets. I established that tags are per-observation rather than per-entity precisely this
-way — `decision:agreement-service-as-64-sync-design` returns 3 observations unfiltered and 2 under
+way — one `decision:…-sync-design` entity returns 3 observations unfiltered and 2 under
 `subsystem: infrastructure`, so the missing one must be tagged otherwise. That inference should
 not require N calls and a set difference.
 
 It also makes the hygiene problem invisible in-session. This project reads
 `infrastructure 133 / untagged 139` out of ~341 mapped observations: 80% of the graph in two
-buckets that don't discriminate, while `oauth` holds 8 observations in an OAuth authorization
-server. An agent cannot spot that from any read result — only from the SessionStart summary.
+buckets that don't discriminate, while the tag covering its actual problem domain holds 8.
+An agent cannot spot that from any read result — only from the SessionStart summary.
 
 **Ask:** include `subsystem` (nullable) in the observation objects returned by
 `memory_get_entity`, `memory_search`, and `memory_recent`. Additive and backward-compatible.
@@ -46,7 +47,7 @@ server. An agent cannot spot that from any read result — only from the Session
 The SessionStart map renders `(untagged)` as a row beside real tags, e.g.:
 
 ```
-api (29, 08-04) · infrastructure (133, 08-04) · (untagged) (139, 08-04) · oauth (8, 08-03) · …
+api (29, 08-04) · infrastructure (133, 08-04) · (untagged) (139, 08-04) · search (8, 08-03) · …
 ```
 
 with the instruction `memory_search(subsystem: …) to read`. Passing that value returns nothing:

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { renderInjection } from "../src/lib/injection.js";
 
-const PROJECT = "github.com/troglodyte/claude-neo4j-mem";
+const PROJECT = "example.com/acme/claude-neo4j-mem";
 
 const PINNED = {
   facts: [
@@ -56,4 +56,10 @@ test("renderInjection omits empty sections rather than printing empty headings",
   assert.ok(!empty.includes("Always applies"));
   assert.ok(!empty.includes("Tagged history"));
   assert.ok(empty.includes(PROJECT), "still identifies the project");
+});
+
+test("the hidden-facts note leaves out repeats that were collapsed on purpose", () => {
+  const clipped = { ...PINNED, total: 9, collapsed: 2, returned: 2, truncated: true };
+  const out = renderInjection({ project: PROJECT, pinned: clipped, map: MAP });
+  assert.ok(out.includes("5 more"), "9 eligible, 2 collapsed, 2 shown: 5 were cut for space");
 });

@@ -6,6 +6,56 @@ Version numbers track `.claude-plugin/plugin.json` and `package.json`, which are
 kept in step deliberately: `claude plugin update` compares that string, so a
 release that doesn't move it never reaches any other project.
 
+## Unreleased
+
+- **Added** `npm run migrate-to-sqlite`, which copies the memory graph into
+  `~/.claude-neo4j/memory.sqlite` and checks every row against Neo4j: each
+  entity, observation, relation and session must exist with identical fields, and
+  session links are rebuilt from session ids. Neo4j is only read and the plugin's
+  config is unchanged; nothing uses the SQLite file yet. It reads the graph twice
+  and copies only once both reads match, so it runs while sessions are open, and
+  until the engine switches to SQLite a re-run adds whatever was written since.
+  A label, relationship or property it does not carry (an inventory runs with
+  every read; `source` from `migrate-claude-mem` is carried) stops it before it
+  writes, as does a `memory.sqlite-wal` left without its database or an `--out`
+  that is some other database. Exit codes: 0 nothing missing or changed, 1 the
+  check failed, 2 it could not run. `--check-only` checks an existing file
+  without writing to it.
+
+- **Added** a cross-project fallback to `memory_search`. When a project-scoped
+  search comes back none or weak, it looks across all projects and, if a match
+  really answers the query, adds a separate `otherProjects` block (at most 3
+  results, two observations each, labelled with their project, with a note not to
+  present them as facts about this repo). This project's own `results`,
+  `relevance` and `topScore` are unchanged, and a strong local match never
+  triggers it. Every logged miss that had an answer elsewhere was in another
+  project's namespace (a sub-project recorded under a different name, a worktree
+  recorded as its own project). The relevance floor alone let nonsense through
+  across the whole graph, so a match must also contain at least half of the
+  query's words (two or more for multi-word queries) and score 4.0+ when the
+  query has several words. Replayed on 7 real misses it rescues 6, and on 45
+  junk searches it surfaces nothing. `CLAUDE_NEO4J_SEARCH_FALLBACK=off` disables
+  it; telemetry records `fallback` (how many it added).
+
+- **Changed** `memory_search` caps each entity's `relations` at 8 (default) and adds
+  `relationCount` with the true total. Relations were about half of a typical
+  result, and a few hub entities carry hundreds, so call cost tracked graph
+  density. Targets already in the result set come first, then targets sharing a
+  word with the query. Replayed over 198 real searches this saves ~29% of
+  characters; entities and observations are unchanged, and the room freed lets
+  extra entities fit under the budget in 23 of them. `memory_get_entity` still
+  returns every relation. `CLAUDE_NEO4J_SEARCH_RELATIONS_CAP=<n>` sets the cap;
+  `0` or `off` restores the old behaviour.
+- **Added** the entity name to `memory_get_entity` telemetry, so the log can show
+  whether lookups follow a relation shown by an earlier search, and the entity
+  names a `memory_search` showed (`shown`, rank order, no observation text).
+- **Added** `npm run search-review` and `docs/search-payload-review.md`: replays
+  logged searches and ranks follow-up lookups against what each search showed,
+  with the baseline and the thresholds for revisiting a smaller result. Also a
+  README section on what the plugin does, and does not do, for context.
+- **Fixed** worktrees (and subdirectories) of a repo with no `origin` remote
+  being recorded as their own project. They now resolve to the main checkout.
+
 ## 0.6.0 — 2026-08-06
 
 - **Fixed** `searchMemory` returning nothing for an entity matched only by its

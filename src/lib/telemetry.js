@@ -58,13 +58,23 @@ export function toolKind(tool) {
  * hide exactly the misses this log exists to surface.
  */
 export function countResults(value) {
-  if (value === null || value === undefined) return 0;
-  if (Array.isArray(value)) return value.length;
-  if (typeof value !== "object") return 1;
-  for (const key of ["facts", "events", "results", "entities"]) {
-    if (Array.isArray(value[key])) return value[key].length;
+  if (value === null || value === undefined) {
+    return 0;
   }
-  if (value.error) return 0;
+  if (Array.isArray(value)) {
+    return value.length;
+  }
+  if (typeof value !== "object") {
+    return 1;
+  }
+  for (const key of ["facts", "events", "results", "entities"]) {
+    if (Array.isArray(value[key])) {
+      return value[key].length;
+    }
+  }
+  if (value.error) {
+    return 0;
+  }
   return 1;
 }
 
@@ -74,11 +84,50 @@ export { topScore, WEAK_SCORE } from "./relevance.js";
 
 function rotateIfLarge(file) {
   try {
-    if (fs.statSync(file).size <= MAX_LOG_BYTES) return;
+    if (fs.statSync(file).size <= MAX_LOG_BYTES) {
+      return;
+    }
     fs.renameSync(file, `${file}.1`);
   } catch {
     // No file yet, or the rename lost a race: either way, just append.
   }
+}
+
+/**
+ * What a lookup asked for. Only lookups carry anything: write tools would
+ * otherwise leak observation text into a second store. memory_get_entity is
+ * keyed by name rather than query, and recording that name is what lets the
+ * report tell whether a lookup followed a relation shown by an earlier search.
+ */
+function lookupFields(tool, args) {
+  if (SEARCH_TOOLS.has(tool) && typeof args?.query === "string") {
+    return { query: args.query };
+  }
+  if (tool === "memory_get_entity" && typeof args?.name === "string") {
+    return { entity: args.name };
+  }
+  return {};
+}
+
+// Enough to rank a later lookup against what a search offered; no observation text.
+const MAX_SHOWN = 10;
+
+/**
+ * What a memory_search showed: the entity names it returned, in rank order, and
+ * how many other-project matches the fallback added. Empty for every other tool.
+ */
+function shownFields(tool, value) {
+  if (tool !== "memory_search") {
+    return {};
+  }
+  const fields = {};
+  if (Array.isArray(value?.results) && value.results.length > 0) {
+    fields.shown = value.results.slice(0, MAX_SHOWN).map((r) => r.name);
+  }
+  if (Array.isArray(value?.otherProjects?.results) && value.otherProjects.results.length > 0) {
+    fields.fallback = value.otherProjects.results.length;
+  }
+  return fields;
 }
 
 /**
@@ -87,7 +136,9 @@ function rotateIfLarge(file) {
  * can price reads in the units the ceilings are written in.
  */
 export function recordToolCall({ tool, project = null, args = null, value = null, chars = 0, ok = true, ms = null, error = null }) {
-  if (isDisabled()) return;
+  if (isDisabled()) {
+    return;
+  }
 
   const entry = {
     at: new Date().toISOString(),
@@ -98,15 +149,24 @@ export function recordToolCall({ tool, project = null, args = null, value = null
     hits: ok ? countResults(value) : 0,
     chars,
   };
-  if (ms !== null) entry.ms = ms;
-  if (error) entry.error = error.message ?? String(error);
+  if (ms !== null) {
+    entry.ms = ms;
+  }
+  if (error) {
+    entry.error = error.message ?? String(error);
+  }
   if (ok) {
     const score = topScore(value);
-    if (score !== null) entry.topScore = score;
+    if (score !== null) {
+      entry.topScore = score;
+    }
+    if (typeof value?.relevance === "string") {
+      entry.relevance = value.relevance;
+    }
   }
   // Only lookups carry a query. Write tools would otherwise leak observation
   // text into a second store, which is duplication with no reporting value.
-  if (SEARCH_TOOLS.has(tool) && typeof args?.query === "string") entry.query = args.query;
+  Object.assign(entry, lookupFields(tool, args), ok ? shownFields(tool, value) : {});
 
   const file = telemetryFile();
   try {
@@ -127,7 +187,9 @@ export function readTelemetry(file = telemetryFile()) {
   }
   const entries = [];
   for (const line of raw.split("\n")) {
-    if (!line.trim()) continue;
+    if (!line.trim()) {
+      continue;
+    }
     try {
       entries.push(JSON.parse(line));
     } catch {
@@ -143,7 +205,9 @@ function bump(map, key, entry) {
   row[entry.kind === "write" ? "writes" : "reads"] += 1;
   row.chars += entry.chars ?? 0;
   row.hits += entry.hits ?? 0;
-  if (entry.ok === false) row.errors += 1;
+  if (entry.ok === false) {
+    row.errors += 1;
+  }
   map.set(key, row);
   return row;
 }
@@ -173,14 +237,26 @@ export function summarize(entries) {
     totals.calls += 1;
     totals[entry.kind === "write" ? "writes" : "reads"] += 1;
     totals.chars += entry.chars ?? 0;
-    if (entry.ok === false) totals.errors += 1;
+    if (entry.ok === false) {
+      totals.errors += 1;
+    }
 
     if (entry.kind !== "write" && entry.ok !== false && SEARCH_TOOLS.has(entry.tool)) {
       totals.hitableReads += 1;
       const empty = (entry.hits ?? 0) === 0;
-      const weak = !empty && typeof entry.topScore === "number" && entry.topScore < WEAK_SCORE;
-      if (empty) totals.zeroHitReads += 1;
-      if (weak) totals.weakReads += 1;
+      // A labelled entry was judged by the engine that served it; only Neo4j-era
+      // entries, which carry a score but no label, fall back to the score floor.
+      const weak =
+        !empty &&
+        (typeof entry.relevance === "string"
+          ? entry.relevance === "weak"
+          : typeof entry.topScore === "number" && entry.topScore < WEAK_SCORE);
+      if (empty) {
+        totals.zeroHitReads += 1;
+      }
+      if (weak) {
+        totals.weakReads += 1;
+      }
       if (empty || weak) {
         totals.missedReads += 1;
         if (entry.query) {
@@ -195,8 +271,12 @@ export function summarize(entries) {
     bump(byProject, entry.project ?? "(unknown)", entry);
     bump(byTool, entry.tool, entry);
     if (entry.at) {
-      if (!firstAt || entry.at < firstAt) firstAt = entry.at;
-      if (!lastAt || entry.at > lastAt) lastAt = entry.at;
+      if (!firstAt || entry.at < firstAt) {
+        firstAt = entry.at;
+      }
+      if (!lastAt || entry.at > lastAt) {
+        lastAt = entry.at;
+      }
     }
   }
 

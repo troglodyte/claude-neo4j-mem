@@ -3,12 +3,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { ensureSchema } from "../lib/schema.js";
 import { detectProject } from "../lib/project.js";
 import { addObservations, createRelation, listEntityNames, listSubsystems } from "../lib/graph.js";
 import { filterVocabulary } from "../lib/subsystem.js";
-import { closeDriver, verifyConnectivity } from "../lib/neo4jClient.js";
-import { isConfigured, CONFIG_DIR, STATE_DIR, ensureStateDir } from "../lib/config.js";
+import { storeStatus, closeDb } from "../lib/memoryStore.js";
+import { CONFIG_DIR, STATE_DIR, ensureStateDir } from "../lib/config.js";
 import { recordCapture } from "../lib/captureDigest.js";
 import { extractStructured } from "../lib/extract.js";
 
@@ -155,12 +154,20 @@ function writeState(sessionId, state) {
 }
 
 function extractText(content) {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
   return content
     .map((block) => {
-      if (block.type === "text") return block.text;
-      if (block.type === "tool_use") return `[used tool ${block.name}]`;
+      if (block.type === "text") {
+        return block.text;
+      }
+      if (block.type === "tool_use") {
+        return `[used tool ${block.name}]`;
+      }
       return "";
     })
     .filter(Boolean)
@@ -182,9 +189,13 @@ function readNewTranscriptText(transcriptPath, lastLine) {
     }
     const role = entry?.message?.role;
     const content = entry?.message?.content;
-    if (!role || !content) continue;
+    if (!role || !content) {
+      continue;
+    }
     const text = extractText(content);
-    if (text) turns.push(`${role}: ${text}`);
+    if (text) {
+      turns.push(`${role}: ${text}`);
+    }
   }
   return { text: turns.join("\n\n"), totalLines: lines.length };
 }
@@ -220,13 +231,20 @@ export function mergeMemories(results) {
   const relations = new Map();
   for (const result of results) {
     for (const entity of result.entities ?? []) {
-      if (!entity?.name || !entity.observations?.length) continue;
+      if (!entity?.name || !entity.observations?.length) {
+        continue;
+      }
       const existing = entities.get(entity.name);
-      if (existing) existing.observations.push(...entity.observations);
-      else entities.set(entity.name, { ...entity, observations: [...entity.observations] });
+      if (existing) {
+        existing.observations.push(...entity.observations);
+      } else {
+        entities.set(entity.name, { ...entity, observations: [...entity.observations] });
+      }
     }
     for (const relation of result.relations ?? []) {
-      if (!relation?.from || !relation.to || !relation.type) continue;
+      if (!relation?.from || !relation.to || !relation.type) {
+        continue;
+      }
       relations.set(`${relation.from}|${relation.type}|${relation.to}`, relation);
     }
   }
@@ -234,10 +252,13 @@ export function mergeMemories(results) {
 }
 
 // Does the actual capture: read new transcript text, extract memories via a
-// headless claude call, write them to Neo4j. Shared by the synchronous
+// headless claude call, write them to the memory store. Shared by the synchronous
 // PreCompact path and the detached SessionEnd worker.
 async function runCapture({ sessionId, transcriptPath, cwd, maxChunks = MAX_CHUNKS, timeoutMs = CAPTURE_TIMEOUT_MS }) {
-  await verifyConnectivity();
+  const status = storeStatus();
+  if (!status.ready) {
+    throw new Error(`memory unavailable: ${status.reason}`);
+  }
 
   const state = readState(sessionId);
   const { text, totalLines } = readNewTranscriptText(transcriptPath, state.lastLine);
@@ -245,8 +266,6 @@ async function runCapture({ sessionId, transcriptPath, cwd, maxChunks = MAX_CHUN
   if (totalLines <= state.lastLine || text.trim().length < 40) {
     return { added: 0 };
   }
-
-  await ensureSchema();
 
   const project = detectProject(cwd);
   const knownNames = await listEntityNames(project);
@@ -367,7 +386,7 @@ async function runDetachedWorker(inputFile) {
       }
     }
   } finally {
-    await closeDriver();
+    closeDb();
   }
 }
 
@@ -398,12 +417,16 @@ export function sweepPendingCaptures({ now = Date.now() } = {}) {
   }
 
   for (const file of files) {
-    if (!isPendingInput(file)) continue;
+    if (!isPendingInput(file)) {
+      continue;
+    }
     const inputFile = path.join(STATE_DIR, file);
     try {
       // Age gate: a fresh file probably belongs to a worker still running, and
       // relaunching it would double-write the same observations.
-      if (now - fs.statSync(inputFile).mtimeMs < RETRY_AFTER_MS) continue;
+      if (now - fs.statSync(inputFile).mtimeMs < RETRY_AFTER_MS) {
+        continue;
+      }
       const input = JSON.parse(fs.readFileSync(inputFile, "utf8"));
       if (!fs.existsSync(input.transcript_path ?? "")) {
         log(`sweep: dropping ${file}, its transcript is gone`);
@@ -429,9 +452,13 @@ export function sweepPendingCaptures({ now = Date.now() } = {}) {
 export function pruneStaleState({ now = Date.now() } = {}) {
   try {
     for (const file of fs.readdirSync(STATE_DIR)) {
-      if (!file.endsWith(".json") || isPendingInput(file)) continue;
+      if (!file.endsWith(".json") || isPendingInput(file)) {
+        continue;
+      }
       const full = path.join(STATE_DIR, file);
-      if (now - fs.statSync(full).mtimeMs > STATE_FILE_TTL_MS) fs.unlinkSync(full);
+      if (now - fs.statSync(full).mtimeMs > STATE_FILE_TTL_MS) {
+        fs.unlinkSync(full);
+      }
     }
   } catch {
     // best-effort housekeeping
@@ -448,7 +475,7 @@ async function main() {
   const input = JSON.parse(fs.readFileSync(0, "utf8") || "{}");
   const { session_id: sessionId, transcript_path: transcriptPath, cwd, hook_event_name: eventName } = input;
 
-  if (!isConfigured() || process.env.CLAUDE_NEO4J_DISABLE_CAPTURE || !sessionId || !transcriptPath) {
+  if (process.env.CLAUDE_NEO4J_DISABLE_CAPTURE || !sessionId || !transcriptPath) {
     process.stdout.write("{}");
     return;
   }
@@ -511,7 +538,7 @@ async function main() {
     }
     process.stdout.write("{}");
   } finally {
-    await closeDriver();
+    closeDb();
   }
 }
 

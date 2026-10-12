@@ -13,11 +13,33 @@ export function detectProject(cwd = process.cwd()) {
     })
       .toString()
       .trim();
-    if (remote) return normalizeRemote(remote);
+    if (remote) {
+      return normalizeRemote(remote);
+    }
   } catch {
     // not a git repo, or no "origin" remote
   }
-  return path.basename(cwd);
+  return mainCheckoutName(cwd) ?? path.basename(cwd);
+}
+
+/**
+ * Name of the main checkout's directory, for repos with no origin remote. Without this a
+ * worktree (or a subdirectory) names its own project after itself and recalls from an
+ * empty graph. Null when cwd is not in a repo or the repo is bare (no ".git" directory).
+ */
+function mainCheckoutName(cwd) {
+  try {
+    const common = execFileSync("git", ["rev-parse", "--git-common-dir"], {
+      cwd,
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+      .toString()
+      .trim();
+    const gitDir = path.resolve(cwd, common);
+    return path.basename(gitDir) === ".git" ? path.basename(path.dirname(gitDir)) : null;
+  } catch {
+    return null;
+  }
 }
 
 function normalizeRemote(remote) {

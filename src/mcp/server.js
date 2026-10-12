@@ -2,11 +2,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { ensureSchema } from "../lib/schema.js";
 import * as graph from "../lib/graph.js";
 import { detectProject } from "../lib/project.js";
-import { closeDriver } from "../lib/neo4jClient.js";
-import { loadConnectionConfig, shouldNotifyOnWrite } from "../lib/config.js";
+import { getDb, closeDb, storeStatus } from "../lib/memoryStore.js";
+import { shouldNotifyOnWrite } from "../lib/config.js";
 import { recordToolCall } from "../lib/telemetry.js";
 
 const project = detectProject();
@@ -39,7 +38,7 @@ function registerTool(name, description, schema, handler) {
 
 registerTool(
   "memory_search",
-  "Full-text search the Neo4j memory graph for entities and observations matching a query. Returns {results, relevance, topScore} where results are matching entities with their most recent observations and directly related entities. `relevance` is 'strong', 'weak', or 'none': the index tokenizes on punctuation, so a query can match a fragment and return real-looking rows that do not answer it. When `relevance` is 'weak' a `note` explains why - tell the user memory doesn't appear to have this rather than presenting those rows as the answer.",
+  "Full-text search memory for entities and observations matching a query. Returns {results, relevance, topScore} where results are matching entities with their best-matching observations and a capped list of directly related entities, each {type, entity, direction}: direction 'out' means this result -[type]-> entity, 'in' means entity -[type]-> this result, 'self' a relation to itself (`relationCount` is the true total; call memory_get_entity for every relation). `relevance` is 'strong', 'weak', or 'none': 'weak' means the best result holds only one of a multi-word query's words, a fragment match that likely does not answer it. When `relevance` is 'weak' a `note` explains why - tell the user memory doesn't appear to have this rather than presenting those rows as the answer. When this project has no strong match, a separate `otherProjects` block may list up to 3 matches from OTHER projects, each labelled with its `project`: treat them as context from elsewhere, say where they came from, and never present them as facts about this repo.",
   {
     query: z.string().describe("Search text"),
     limit: z.number().int().min(1).max(50).optional(),
@@ -192,24 +191,26 @@ registerTool(
 
 registerTool(
   "memory_status",
-  "Report memory backend connection info (local Docker vs remote) and entity/observation counts for the current project.",
+  "Report where memory is stored (the SQLite file) and entity/observation counts for the current project.",
   {},
   async () => {
-    const { uri, database, mode } = loadConnectionConfig();
+    const { path } = storeStatus();
     const counts = await graph.getStatus({ project });
-    return { uri, database, mode, project, ...counts };
+    return { engine: "sqlite", path, project, ...counts };
   }
 );
 
-await ensureSchema().catch(() => {
-  // Connectivity/config problems surface per-tool-call instead of killing the server at startup.
-});
+try {
+  getDb();
+} catch {
+  // Store problems surface per tool call instead of killing the server at startup.
+}
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
 
 async function shutdown() {
-  await closeDriver();
+  closeDb();
   process.exit(0);
 }
 process.on("SIGINT", shutdown);

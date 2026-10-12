@@ -1,14 +1,14 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { ensureSchema } from "../src/lib/schema.js";
-import { closeDriver } from "../src/lib/neo4jClient.js";
+import { useTempStore } from "./helpers/tempStore.js";
+import { closeDb } from "../src/lib/memoryStore.js";
 import * as graph from "../src/lib/graph.js";
 
 const PROJECT = "test:search";
 const ENTITY = "decision:zzqx-storage-layout";
 
 before(async () => {
-  await ensureSchema();
+  useTempStore();
   await graph.deleteEntity(ENTITY, PROJECT);
   await graph.addObservations({
     entity: ENTITY,
@@ -24,7 +24,7 @@ before(async () => {
 
 after(async () => {
   await graph.deleteEntity(ENTITY, PROJECT);
-  await closeDriver();
+  closeDb();
 });
 
 // Searching an entity by its own name is what escapeLuceneQuery exists to make

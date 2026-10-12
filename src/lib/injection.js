@@ -26,7 +26,7 @@ const TOOLS_BLURB =
 const shortDate = (iso) => (typeof iso === "string" && iso.length >= 10 ? iso.slice(5, 10) : "?");
 
 export function renderInjection({ project, pinned, map = [] }) {
-  const sections = [`## Memory (Neo4j · ${project})`];
+  const sections = [`## Memory (${project})`];
 
   const facts = pinned?.facts ?? [];
   if (facts.length > 0) {
@@ -35,7 +35,7 @@ export function renderInjection({ project, pinned, map = [] }) {
     // the budget bit, say so rather than letting a partial list read as whole.
     if (pinned.truncated) {
       block +=
-        `\n- [${pinned.total - pinned.returned} more standing fact(s) not shown — ` +
+        `\n- [${pinned.total - (pinned.collapsed ?? 0) - pinned.returned} more standing fact(s) not shown — ` +
         `memory_search("preference") or memory_search("constraint") to read them]`;
     }
     sections.push(block);

@@ -1,7 +1,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { ensureSchema } from "../src/lib/schema.js";
-import { closeDriver } from "../src/lib/neo4jClient.js";
+import { useTempStore } from "./helpers/tempStore.js";
+import { closeDb } from "../src/lib/memoryStore.js";
 import { BUDGETS } from "../src/lib/budget.js";
 import * as graph from "../src/lib/graph.js";
 
@@ -9,11 +9,13 @@ const PROJECT = "test:pinned";
 const ENTITIES = ["preference:test-style", "decision:test-noise", "user", "Constraint Amendment holder"];
 
 async function clean() {
-  for (const name of ENTITIES) await graph.deleteEntity(name, PROJECT);
+  for (const name of ENTITIES) {
+    await graph.deleteEntity(name, PROJECT);
+  }
 }
 
 before(async () => {
-  await ensureSchema();
+  useTempStore();
   await clean();
   await graph.addObservations({
     entity: "preference:test-style",
@@ -43,7 +45,7 @@ before(async () => {
 
 after(async () => {
   await clean();
-  await closeDriver();
+  closeDb();
 });
 
 test("getPinnedFacts selects standing facts and excludes one-off decisions", async () => {

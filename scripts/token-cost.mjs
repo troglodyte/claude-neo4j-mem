@@ -10,8 +10,7 @@
 //   node scripts/token-cost.mjs --all           measure every project in the db
 import * as graph from "../src/lib/graph.js";
 import { detectProject } from "../src/lib/project.js";
-import { closeDriver } from "../src/lib/neo4jClient.js";
-import { ensureSchema } from "../src/lib/schema.js";
+import { getDb, closeDb } from "../src/lib/memoryStore.js";
 import { renderInjection } from "../src/lib/injection.js";
 
 // Ceilings are per single call, in characters. ~4 chars/token, so the timeline
@@ -30,9 +29,11 @@ const chars = (value) => JSON.stringify(value ?? null).length;
 function parseArgs(argv) {
   const flags = { project: null, all: false };
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--project") flags.project = argv[++i];
-    else if (argv[i] === "--all") flags.all = true;
-    else {
+    if (argv[i] === "--project") {
+      flags.project = argv[++i];
+    } else if (argv[i] === "--all") {
+      flags.all = true;
+    } else {
       console.error(`Unknown argument: ${argv[i]}`);
       process.exit(1);
     }
@@ -69,7 +70,7 @@ async function measure(project) {
 
 async function main() {
   const flags = parseArgs(process.argv.slice(2));
-  await ensureSchema();
+  getDb();
 
   const projects = flags.all
     ? (await graph.listProjects()).map((p) => p.project)
@@ -82,7 +83,9 @@ async function main() {
     for (const [name, size, note] of await measure(project)) {
       const ceiling = CEILINGS[name] ?? Infinity;
       const over = size > ceiling;
-      if (over) failures++;
+      if (over) {
+        failures++;
+      }
       console.log(
         "  " +
           name.padEnd(24) +
@@ -107,4 +110,4 @@ main()
     console.error(`Error: ${error.message}`);
     process.exitCode = 1;
   })
-  .finally(() => closeDriver());
+  .finally(() => closeDb());

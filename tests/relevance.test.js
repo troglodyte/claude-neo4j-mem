@@ -1,7 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
-import { topScore, classifyRelevance, describeRelevance, WEAK_SCORE } from "../src/lib/relevance.js";
+import { topScore, classifyRelevance, describeRelevance, queryWords } from "../src/lib/relevance.js";
 
 describe("topScore", () => {
   test("takes the best score present, ignoring unscored rows", () => {
@@ -21,43 +21,56 @@ describe("topScore", () => {
   });
 });
 
+describe("queryWords", () => {
+  test("lowercase words longer than two characters", () => {
+    assert.deepEqual([...queryWords("Fix the JUMP-1463 bug, ok?")], ["fix", "the", "jump", "1463", "bug"]);
+  });
+});
+
 describe("classifyRelevance", () => {
   test("no rows is a miss, not a weak match", () => {
-    assert.equal(classifyRelevance([]), "none");
+    assert.equal(classifyRelevance([], "anything at all"), "none");
   });
 
-  test("splits weak from strong at the calibrated floor", () => {
-    // Measured on this repo: junk fragment match 1.61, real queries 3.35-9.28.
-    assert.equal(classifyRelevance([{ score: 1.61 }]), "weak");
-    assert.equal(classifyRelevance([{ score: 3.35 }]), "strong");
-    assert.equal(classifyRelevance([{ score: 9.28 }]), "strong");
-    assert.ok(WEAK_SCORE > 1.61 && WEAK_SCORE < 3.35);
+  test("a multi-word query whose best result holds only one of its words is weak", () => {
+    assert.equal(classifyRelevance([{ matchedQueryWords: 1 }], "zzz-nonexistent-term-qqq"), "weak");
   });
 
-  test("the floor is exclusive, so exactly-at-threshold counts as strong", () => {
-    assert.equal(classifyRelevance([{ score: WEAK_SCORE }]), "strong");
+  test("two matched words make a multi-word result strong, however long the query", () => {
+    assert.equal(classifyRelevance([{ matchedQueryWords: 2 }], "rust crate tests passing modules runner"), "strong");
   });
 
-  test("rows without scores are reported as unscored rather than guessed at", () => {
-    assert.equal(classifyRelevance([{ name: "a" }]), "unscored");
+  test("a single-word query is strong as soon as it matched", () => {
+    assert.equal(classifyRelevance([{ matchedQueryWords: 1 }], "podman"), "strong");
+  });
+
+  test("only the best result decides", () => {
+    assert.equal(classifyRelevance([{ matchedQueryWords: 1 }, { matchedQueryWords: 3 }], "alpha bravo charlie"), "weak");
+  });
+
+  test("rows that carry no match count are reported as unscored rather than guessed at", () => {
+    assert.equal(classifyRelevance([{ name: "a" }], "alpha bravo"), "unscored");
+  });
+
+  test("reads through a results envelope", () => {
+    assert.equal(classifyRelevance({ results: [{ matchedQueryWords: 2 }] }, "alpha bravo"), "strong");
   });
 });
 
 describe("describeRelevance", () => {
   test("explains a weak result in-band so a caller cannot mistake it for an answer", () => {
-    const note = describeRelevance("weak", 1.61);
+    const note = describeRelevance("weak");
     assert.match(note, /weak/i);
-    assert.match(note, /1\.6/);
-    // The point of the note is to license "I don't have that" as a response.
+    assert.match(note, /only one of your query's words/);
     assert.match(note, /may not|might not|likely/i);
   });
 
   test("says nothing when the result stands on its own", () => {
-    assert.equal(describeRelevance("strong", 4.8), null);
-    assert.equal(describeRelevance("unscored", null), null);
+    assert.equal(describeRelevance("strong"), null);
+    assert.equal(describeRelevance("unscored"), null);
   });
 
   test("explains an empty result too", () => {
-    assert.match(describeRelevance("none", null), /no match/i);
+    assert.match(describeRelevance("none"), /no match/i);
   });
 });

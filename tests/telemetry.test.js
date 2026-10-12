@@ -49,7 +49,7 @@ describe("recordToolCall", () => {
   test("writes one JSONL entry per call with the fields the report needs", () => {
     recordToolCall({
       tool: "memory_search",
-      project: "github.com/troglodyte/claude-neo4j-mem",
+      project: "example.com/acme/claude-neo4j-mem",
       args: { query: "podman" },
       value: [{ name: "a" }, { name: "b" }],
       chars: 412,
@@ -62,7 +62,7 @@ describe("recordToolCall", () => {
     const e = entries[0];
     assert.equal(e.tool, "memory_search");
     assert.equal(e.kind, "read");
-    assert.equal(e.project, "github.com/troglodyte/claude-neo4j-mem");
+    assert.equal(e.project, "example.com/acme/claude-neo4j-mem");
     assert.equal(e.hits, 2);
     assert.equal(e.chars, 412);
     assert.equal(e.ok, true);
@@ -75,6 +75,65 @@ describe("recordToolCall", () => {
     recordToolCall({ tool: "memory_search", project: "p", args: { query: "x" }, value: [{ score: 1.61 }], chars: 100, ok: true });
     const [e] = readTelemetry(logFile);
     assert.equal(e.topScore, 1.61);
+  });
+
+  test("records the relevance label a search came back with", () => {
+    recordToolCall({
+      tool: "memory_search",
+      project: "p",
+      args: { query: "x" },
+      value: { results: [{ name: "a", score: 9 }], relevance: "weak", topScore: 9 },
+      chars: 100,
+      ok: true,
+    });
+    const [e] = readTelemetry(logFile);
+    assert.equal(e.relevance, "weak");
+  });
+
+  test("records which entity a memory_get_entity call asked for, so relation-following is measurable", () => {
+    recordToolCall({ tool: "memory_get_entity", project: "p", args: { name: "decision:x", limit: 5 }, value: { name: "decision:x" }, chars: 300, ok: true });
+    const [e] = readTelemetry(logFile);
+    assert.equal(e.entity, "decision:x");
+    assert.equal(e.query, undefined);
+  });
+
+  test("records no entity for other tools", () => {
+    recordToolCall({ tool: "memory_add_observations", project: "p", args: { entity: "user", name: "n" }, value: { added: 1 }, chars: 50, ok: true });
+    recordToolCall({ tool: "memory_search", project: "p", args: { query: "x", name: "n" }, value: [], chars: 10, ok: true });
+    const entries = readTelemetry(logFile);
+    assert.equal(entries[0].entity, undefined);
+    assert.equal(entries[1].entity, undefined);
+  });
+
+  test("records the entity names a memory_search showed, in rank order, so follow-ups can be ranked", () => {
+    const results = Array.from({ length: 12 }, (_, i) => ({ name: `e${i}`, score: 12 - i, observations: [{ text: "secret text" }], relations: [] }));
+    recordToolCall({ tool: "memory_search", project: "p", args: { query: "x" }, value: { results, relevance: "strong", topScore: 12 }, chars: 500, ok: true });
+    const [e] = readTelemetry(logFile);
+    assert.deepEqual(e.shown, ["e0", "e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8", "e9"]);
+    assert.equal(JSON.stringify(e).includes("secret text"), false, "observation text must not reach the log");
+  });
+
+  test("records how many other-project matches a fallback added, even when the project's own results were empty", () => {
+    const value = { results: [], relevance: "none", otherProjects: { note: "n", results: [{ name: "a" }, { name: "b" }] } };
+    recordToolCall({ tool: "memory_search", project: "p", args: { query: "x" }, value, chars: 400, ok: true });
+    const [e] = readTelemetry(logFile);
+    assert.equal(e.fallback, 2);
+    assert.equal(e.hits, 0, "the scoped search still counts as a miss");
+    assert.equal(e.shown, undefined);
+  });
+
+  test("records no fallback when none was used", () => {
+    recordToolCall({ tool: "memory_search", project: "p", args: { query: "x" }, value: { results: [{ name: "a" }] }, chars: 10, ok: true });
+    const [e] = readTelemetry(logFile);
+    assert.equal(e.fallback, undefined);
+  });
+
+  test("records no shown list for other tools or an empty search", () => {
+    recordToolCall({ tool: "memory_get_entity", project: "p", args: { name: "a" }, value: { name: "a", results: [{ name: "z" }] }, chars: 10, ok: true });
+    recordToolCall({ tool: "memory_search", project: "p", args: { query: "x" }, value: { results: [] }, chars: 10, ok: true });
+    const entries = readTelemetry(logFile);
+    assert.equal(entries[0].shown, undefined);
+    assert.equal(entries[1].shown, undefined);
   });
 
   test("tags write tools as writes and records no query", () => {
@@ -186,6 +245,17 @@ describe("summarize", () => {
       "weak matches are listed as candidate gaps, flagged as weak"
     );
     assert.ok(WEAK_SCORE > 1.61 && WEAK_SCORE < 3.35, "threshold sits between fragment noise and real relevance");
+  });
+
+  test("a search logged with a label is judged by the label, not by its score", () => {
+    const labelled = [
+      ...entries,
+      { at: "2026-08-02T12:00:00.000Z", tool: "memory_search", kind: "read", project: "a", hits: 3, topScore: 14.2, relevance: "weak", chars: 300, ok: true, query: "zzz-nonexistent-term-qqq" },
+      { at: "2026-08-02T12:01:00.000Z", tool: "memory_search", kind: "read", project: "a", hits: 2, topScore: 0.4, relevance: "strong", chars: 300, ok: true, query: "podman" },
+    ];
+    const s = summarize(labelled);
+    assert.equal(s.totals.weakReads, 1);
+    assert.deepEqual(s.missedQueries.filter((q) => q.weak).map((q) => q.query), ["zzz-nonexistent-term-qqq"]);
   });
 
   test("breaks calls down per tool", () => {

@@ -1,62 +1,44 @@
 import { randomUUID } from "node:crypto";
-import { withSession, int } from "./neo4jClient.js";
+import { getDb, inTransaction } from "./memoryStore.js";
+import { indexText } from "./segment.js";
 import { resolveCanonicalName } from "./dedup.js";
 import { resolveSubsystem, parseSubsystemFilter, UNTAGGED } from "./subsystem.js";
 import { BUDGETS, truncateText, fitToBudget } from "./budget.js";
+import { wordOverlap } from "./similarity.js";
 import { classifyRelevance, topScore, describeRelevance } from "./relevance.js";
+import { capRelations, resolveRelationCap } from "./relations.js";
+import { shouldFallBack, otherProjectResults } from "./fallback.js";
+import { searchRows } from "./search.js";
 
-// Callers search with plain phrases and with entity names, and this plugin's
-// naming convention puts Lucene syntax characters right in those names
-// ("feature:capture-visibility"). Unescaped, Lucene reads the colon as a field
-// separator and the hyphen as negation, so searching for an entity by its own
-// name parsed as a query against a nonexistent field and silently returned
-// nothing. Escaping trades wildcard support for queries that mean what they say.
-const LUCENE_SPECIAL = /([+\-!(){}[\]^"~*?:\\/&|])/g;
+// The SQLite engine: the same exported functions as the Neo4j engine it
+// replaces, over the schema in sqliteDb.js.
+// Spec: docs/superpowers/specs/2026-10-09-sqlite-engine-design.md.
 
-function escapeLuceneQuery(query) {
-  return query.replace(LUCENE_SPECIAL, "\\$1");
-}
+// A read for a project sees that project's entities and the global ones
+// (stored as project ''); a read with no project sees everything. Binds :project.
+const IN_SCOPE = "(:project IS NULL OR e.project = :project OR e.project = '')";
 
-// Cypher can't match a literal `null` in a property map (MERGE {project: null}
-// never finds an existing node, since equality against null is always
-// unknown) - every project-scoped MATCH/MERGE below spells the comparison out
-// as "(project IS NOT NULL AND x.project = $project) OR (project IS NULL AND
-// x.project IS NULL)" instead of relying on map-literal equality.
+// The subsystem filter's three states (see parseSubsystemFilter): both
+// conjuncts are always present and one is always trivially true. Binds
+// :subsystem and :untaggedOnly (1 or 0: SQLite has no booleans).
+const SUBSYSTEM_FILTER = "(:subsystem IS NULL OR o.subsystem = :subsystem) AND (:untaggedOnly = 0 OR o.subsystem IS NULL)";
 
-// The subsystem predicate, spelled once. It reads two parameters rather than
-// one because the filter has three states (see parseSubsystemFilter), and it
-// takes the node alias because the five sites that need it are matching under
-// three different names - `o` in the observation scans, `node` after a
-// fulltext YIELD, and `o` again inside an EXISTS over an entity's observations.
-// Both conjuncts are always present and one of them is always trivially true,
-// which keeps the two states from drifting apart across those sites.
-const subsystemFilter = (alias) =>
-  `($subsystem IS NULL OR ${alias}.subsystem = $subsystem)
-          AND (NOT $untaggedOnly OR ${alias}.subsystem IS NULL)`;
+const filterParams = (subsystem) => {
+  const filter = parseSubsystemFilter(subsystem);
+  return { subsystem: filter.subsystem, untaggedOnly: filter.untaggedOnly ? 1 : 0 };
+};
 
-async function upsertEntity(session, name, type, project) {
-  await session.run(
-    `OPTIONAL MATCH (existing:Entity {name: $name})
-       WHERE ($project IS NOT NULL AND existing.project = $project) OR ($project IS NULL AND existing.project IS NULL)
-     FOREACH (_ IN CASE WHEN existing IS NULL THEN [1] ELSE [] END |
-       CREATE (new:Entity {name: $name, project: $project, type: $type, createdAt: datetime()})
-     )
-     WITH existing
-     WHERE existing IS NOT NULL
-     SET existing.type = coalesce($type, existing.type), existing.updatedAt = datetime()`,
-    { name, type: type ?? null, project: project ?? null }
-  );
-}
+// Callers name a global entity with a null project; storage uses ''...
+const storedProject = (project) => project ?? "";
+// ...and reads hand null back for it, as the Neo4j engine did.
+const shownProject = (project) => (project === "" ? null : project);
+const iso = (ms) => (ms === null || ms === undefined ? null : new Date(ms).toISOString());
 
 export async function listEntityNames(project) {
-  return withSession(async (session) => {
-    const result = await session.run(
-      `MATCH (e:Entity) WHERE $project IS NULL OR e.project = $project OR e.project IS NULL
-       RETURN e.name AS name`,
-      { project: project ?? null }
-    );
-    return result.records.map((r) => r.get("name"));
-  });
+  return getDb()
+    .prepare(`SELECT e.name AS name FROM entities e WHERE ${IN_SCOPE}`)
+    .all({ project: project ?? null })
+    .map((row) => row.name);
 }
 
 /**
@@ -65,377 +47,211 @@ export async function listEntityNames(project) {
  * already in use instead of fragmenting.
  */
 export async function listSubsystems(project) {
-  return withSession(async (session) => {
-    const result = await session.run(
-      `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
-       WHERE ($project IS NULL OR e.project = $project OR e.project IS NULL)
-         AND o.subsystem IS NOT NULL
-       RETURN o.subsystem AS subsystem, count(o) AS observations
-       ORDER BY observations DESC, subsystem ASC`,
-      { project: project ?? null }
-    );
-    return result.records.map((r) => ({
-      subsystem: r.get("subsystem"),
-      observations: r.get("observations").toNumber(),
-    }));
-  });
+  return getDb()
+    .prepare(
+      `SELECT o.subsystem AS subsystem, count(*) AS observations
+       FROM observations o JOIN entities e ON e.id = o.entity_id
+       WHERE ${IN_SCOPE} AND o.subsystem IS NOT NULL
+       GROUP BY o.subsystem
+       ORDER BY observations DESC, subsystem ASC`
+    )
+    .all({ project: project ?? null })
+    .map((row) => ({ subsystem: row.subsystem, observations: row.observations }));
 }
 
 /**
  * A table of contents for the project's memory: one row per subsystem tag with
- * counts and recency. Deliberately an aggregate rather than a sample - its size
- * is bounded by tag cardinality, not by how much text the graph holds, so it
- * costs the same on a 200-observation project and a 20,000-observation one.
- * That is what lets the SessionStart injection stop growing with the graph.
- *
- * Untagged observations get their own row rather than being dropped: an honest
- * count of what hasn't been classified beats a tidy short list.
+ * counts and recency, untagged observations in their own row. Bounded by tag
+ * cardinality, so the SessionStart injection does not grow with the store.
  */
 export async function getSubsystemMap(project) {
-  return withSession(async (session) => {
-    const result = await session.run(
-      `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
-       WHERE $project IS NULL OR e.project = $project OR e.project IS NULL
-       WITH coalesce(o.subsystem, $untagged) AS subsystem, o, e
-       RETURN subsystem,
-              count(o) AS observations,
-              count(DISTINCT e) AS entities,
-              toString(max(o.createdAt)) AS lastSeen
-       ORDER BY lastSeen DESC`,
-      { project: project ?? null, untagged: UNTAGGED }
-    );
-    return result.records.map((r) => ({
-      subsystem: r.get("subsystem"),
-      observations: r.get("observations").toNumber(),
-      entities: r.get("entities").toNumber(),
-      lastSeen: r.get("lastSeen"),
-    }));
-  });
+  return getDb()
+    .prepare(
+      `SELECT coalesce(o.subsystem, :untagged) AS subsystem, count(*) AS observations,
+              count(DISTINCT o.entity_id) AS entities, max(o.created_at) AS lastSeen
+       FROM observations o JOIN entities e ON e.id = o.entity_id
+       WHERE ${IN_SCOPE}
+       GROUP BY coalesce(o.subsystem, :untagged)
+       ORDER BY lastSeen DESC`
+    )
+    .all({ project: project ?? null, untagged: UNTAGGED })
+    .map((row) => ({ subsystem: row.subsystem, observations: row.observations, entities: row.entities, lastSeen: iso(row.lastSeen) }));
 }
 
 export async function upsertSession({ id, cwd, project }) {
-  return withSession(async (session) => {
-    await session.run(
-      `MERGE (s:Session {id: $id})
-       ON CREATE SET s.startedAt = datetime(), s.cwd = $cwd, s.project = $project`,
-      { id, cwd: cwd ?? null, project: project ?? null }
-    );
-  });
+  getDb()
+    .prepare("INSERT INTO sessions (id, cwd, project, started_at) VALUES (?, ?, ?, ?) ON CONFLICT (id) DO NOTHING")
+    .run(id, cwd ?? null, project ?? null, Date.now());
 }
 
-// `existingNames`/`existingSubsystems` let a caller writing several entities
-// in a row fetch these lists once instead of per call. They used to be
-// fetched inside the session below - a nested session acquisition plus a
-// full re-scan on each call, so one 8-entity capture opened 16 sessions and
-// ran the same scans 8 times.
-export async function addObservations({
-  entity,
-  entityType,
-  observations,
-  sessionId,
-  project,
-  existingNames,
-  existingSubsystems,
-}) {
+// Creates the entity, or bumps an existing one; returns its id. An existing
+// entity keeps its type unless a new one is given.
+function upsertEntity(db, name, type, project, now) {
+  const scope = storedProject(project);
+  const existing = db.prepare("SELECT id FROM entities WHERE name = ? AND project = ?").get(name, scope);
+  if (existing) {
+    db.prepare("UPDATE entities SET type = coalesce(?, type), updated_at = ? WHERE id = ?").run(type ?? null, now, existing.id);
+    return existing.id;
+  }
+  const { lastInsertRowid } = db
+    .prepare("INSERT INTO entities (name, project, type, created_at) VALUES (?, ?, ?, ?)")
+    .run(name, scope, type ?? null, now);
+  db.prepare("INSERT INTO entity_name_fts (rowid, words) VALUES (?, ?)").run(lastInsertRowid, indexText(name));
+  return Number(lastInsertRowid);
+}
+
+// `existingNames`/`existingSubsystems` let a caller writing several entities in
+// a row fetch these lists once instead of per call. One call's whole batch
+// shares one created_at; rowid keeps the batch's order.
+export async function addObservations({ entity, entityType, observations, sessionId, project, existingNames, existingSubsystems }) {
   const names = existingNames ?? (await listEntityNames(project));
   const knownSubsystems = existingSubsystems ?? (await listSubsystems(project)).map((s) => s.subsystem);
-  // Accepts a plain string or {text, subsystem}: the MCP tool and the CLI pass
-  // strings, auto-capture and the backfill pass objects. Bounded on the way in,
-  // so one runaway observation can't inflate every future read of this entity.
+  // A plain string or {text, subsystem}; bounded on the way in, so one runaway
+  // observation can't inflate every future read of this entity.
   const rows = observations.map((item) => {
     const { text, subsystem } = typeof item === "string" ? { text: item, subsystem: null } : item;
-    return {
-      id: randomUUID(),
-      text: truncateText(text, BUDGETS.writeTextChars),
-      subsystem: resolveSubsystem(subsystem, knownSubsystems),
-    };
+    return { id: randomUUID(), text: truncateText(text, BUDGETS.writeTextChars), subsystem: resolveSubsystem(subsystem, knownSubsystems) };
   });
-  entity = resolveCanonicalName(entity, names);
-  await withSession(async (session) => {
-    await upsertEntity(session, entity, entityType, project);
-    await session.run(
-      `MATCH (e:Entity {name: $entity})
-       WHERE ($project IS NOT NULL AND e.project = $project) OR ($project IS NULL AND e.project IS NULL)
-       UNWIND $rows AS row
-       CREATE (o:Observation {id: row.id, text: row.text, subsystem: row.subsystem, createdAt: datetime(), sessionId: $sessionId})
-       CREATE (o)-[:ABOUT]->(e)
-       WITH o
-       CALL {
-         WITH o
-         OPTIONAL MATCH (s:Session {id: $sessionId})
-         WITH o, s WHERE s IS NOT NULL
-         CREATE (s)-[:PRODUCED]->(o)
-       }`,
-      { entity, rows, sessionId: sessionId ?? null, project: project ?? null }
-    );
+  const name = resolveCanonicalName(entity, names);
+  const db = getDb();
+  const now = Date.now();
+  inTransaction(db, () => {
+    const entityId = upsertEntity(db, name, entityType, project, now);
+    const insert = db.prepare("INSERT INTO observations (id, entity_id, text, subsystem, session_id, created_at) VALUES (?, ?, ?, ?, ?, ?)");
+    const index = db.prepare("INSERT INTO observation_text_fts (rowid, words) VALUES (?, ?)");
+    for (const row of rows) {
+      const { lastInsertRowid } = insert.run(row.id, entityId, row.text, row.subsystem, sessionId ?? null, now);
+      index.run(lastInsertRowid, indexText(row.text));
+    }
   });
-  return rows.map((r) => r.id);
+  return rows.map((row) => row.id);
 }
 
 export async function createRelation({ from, to, type, project }) {
-  return withSession(async (session) => {
-    const existingNames = await listEntityNames(project);
-    from = resolveCanonicalName(from, existingNames);
-    to = resolveCanonicalName(to, existingNames);
-    await upsertEntity(session, from, null, project);
-    await upsertEntity(session, to, null, project);
-    await session.run(
-      `MATCH (a:Entity {name: $from}), (b:Entity {name: $to})
-       WHERE (($project IS NOT NULL AND a.project = $project) OR ($project IS NULL AND a.project IS NULL))
-         AND (($project IS NOT NULL AND b.project = $project) OR ($project IS NULL AND b.project IS NULL))
-       MERGE (a)-[r:RELATES_TO {type: $type}]->(b)
-       ON CREATE SET r.createdAt = datetime()`,
-      { from, to, type, project: project ?? null }
-    );
+  const names = await listEntityNames(project);
+  const fromName = resolveCanonicalName(from, names);
+  const toName = resolveCanonicalName(to, names);
+  const db = getDb();
+  const now = Date.now();
+  inTransaction(db, () => {
+    const fromId = upsertEntity(db, fromName, null, project, now);
+    const toId = upsertEntity(db, toName, null, project, now);
+    db.prepare(
+      "INSERT INTO relations (from_id, to_id, type, created_at) VALUES (?, ?, ?, ?) ON CONFLICT (from_id, to_id, type) DO NOTHING"
+    ).run(fromId, toId, type, now);
   });
 }
 
-export async function searchMemory(query, limit = 10, project = null, { subsystem = null } = {}) {
-  const filter = parseSubsystemFilter(subsystem);
-  return withSession(async (session) => {
-    const result = await session.run(
-      `CALL {
-         CALL db.index.fulltext.queryNodes('entityNameFulltext', $query) YIELD node, score
-         WITH node AS entity, score
-         WHERE ($subsystem IS NULL AND NOT $untaggedOnly)
-            OR EXISTS { MATCH (o:Observation)-[:ABOUT]->(entity) WHERE ${subsystemFilter("o")} }
-         RETURN entity, score
-         UNION
-         CALL db.index.fulltext.queryNodes('observationTextFulltext', $query) YIELD node, score
-         WHERE ${subsystemFilter("node")}
-         MATCH (node)-[:ABOUT]->(entity)
-         RETURN entity, score
-       }
-       WITH entity, max(score) AS score
-       WHERE $project IS NULL OR entity.project = $project OR entity.project IS NULL
-       OPTIONAL MATCH (recentObs:Observation)-[:ABOUT]->(entity)
-       WITH entity, score, max(recentObs.createdAt) AS lastSeen
-       WITH entity, score,
-         CASE WHEN lastSeen IS NULL THEN score
-              ELSE score * (1.0 / (1.0 + duration.inDays(lastSeen, datetime()).days / 30.0))
-         END AS rankScore
-       ORDER BY rankScore DESC
-       LIMIT $limit
-       // Pull the observations that actually matched the query, best first.
-       // Without this the entity's newest observations were returned instead,
-       // so a hit buried in a large entity's history was scored but never shown.
-       // Returns collect(...) rather than one row per observation, because a
-       // CALL subquery is a join, not an OPTIONAL one: an entity matched only
-       // by its name has no query-matching observation, and the empty inner
-       // result used to eliminate the entity itself. The name index scored it
-       // and nothing ever returned it - which silently defeated the Lucene
-       // escaping above, whose whole purpose is finding an entity by its name.
-       // Aggregating inside the subquery always yields exactly one row (an
-       // empty list when nothing matched), so the outer row survives.
-       CALL {
-         WITH entity
-         CALL db.index.fulltext.queryNodes('observationTextFulltext', $query) YIELD node, score AS obsScore
-         WHERE ${subsystemFilter("node")}
-         MATCH (node)-[:ABOUT]->(entity)
-         WITH {text: node.text, subsystem: node.subsystem} AS obs, obsScore
-         ORDER BY obsScore DESC
-         LIMIT 5
-         RETURN collect(obs) AS matched
-       }
-       WITH entity, rankScore, matched
-       // Top up with recent observations so an entity matched only by name
-       // (or by fewer than five observations) still comes back with context.
-       OPTIONAL MATCH (o:Observation)-[:ABOUT]->(entity)
-       WHERE ${subsystemFilter("o")}
-       WITH entity, rankScore, matched, o
-       ORDER BY o.createdAt DESC
-       // The CASE keeps a no-match OPTIONAL MATCH collecting nothing: collect()
-       // drops nulls, but a map built from a null node is a non-null map of nulls.
-       WITH entity, rankScore, matched,
-            collect(CASE WHEN o IS NULL THEN NULL ELSE {text: o.text, subsystem: o.subsystem} END) AS recent
-       // Deduplicated on text rather than on the whole map: the two lists are
-       // built from the same properties today, and comparing only what is
-       // displayed keeps that from being load-bearing.
-       WITH entity, rankScore, matched, recent, [m IN matched | m.text] AS matchedTexts
-       WITH entity, rankScore,
-            (matched + [r IN recent WHERE NOT r.text IN matchedTexts])[0..5] AS observations
-       OPTIONAL MATCH (entity)-[r:RELATES_TO]-(other)
-       WITH entity, rankScore, observations, collect(DISTINCT CASE WHEN r IS NULL THEN NULL ELSE {type: r.type, entity: other.name} END) AS relationsRaw
-       WITH entity, rankScore, observations, [x IN relationsRaw WHERE x IS NOT NULL] AS relations
-       RETURN entity.name AS name, entity.type AS type, rankScore AS score, observations, relations
-       ORDER BY rankScore DESC`,
-      { query: escapeLuceneQuery(query), limit: int(limit), project: project ?? null, ...filter }
-    );
-    const rows = result.records.map((r) => {
-      const row = r.toObject();
-      return {
-        ...row,
-        observations: row.observations.map((o) => ({ ...o, text: truncateText(o.text, BUDGETS.searchTextChars) })),
-      };
-    });
-    const kept = fitToBudget(rows, BUDGETS.searchTotalChars).kept;
-
-    // The score was always in the payload, but uncalibrated: nothing said that
-    // 1.6 is a fragment match on this index while 4.8 is a real one, so a miss
-    // read exactly like a hit. Classifying it in-band is what lets a caller
-    // answer "memory doesn't have that" instead of summarizing noise.
-    const relevance = classifyRelevance(kept);
-    const score = topScore(kept);
-    const envelope = { results: kept, relevance, topScore: score };
-    const note = describeRelevance(relevance, score);
-    if (note) envelope.note = note;
-    return envelope;
-  });
+export async function getStatus({ project }) {
+  const db = getDb();
+  const params = { project: project ?? null };
+  const { entityCount } = db.prepare(`SELECT count(*) AS entityCount FROM entities e WHERE ${IN_SCOPE}`).get(params);
+  const { observationCount } = db
+    .prepare(`SELECT count(*) AS observationCount FROM observations o JOIN entities e ON e.id = o.entity_id WHERE ${IN_SCOPE}`)
+    .get(params);
+  return { entityCount, observationCount };
 }
 
-// Resolves a name to a single entity: prefers the exact-project match, falls
-// back to a global (project IS NULL) entity of the same name. Shared
-// resolution logic for the by-name lookup/delete tools below, so "get" and
-// "delete" always agree on which same-named entity they mean once duplicate
-// names across projects are possible.
-const RESOLVE_ENTITY_MATCH = `MATCH (e:Entity {name: $name})
-       WHERE $project IS NULL OR e.project = $project OR e.project IS NULL
-       WITH e ORDER BY CASE WHEN e.project = $project THEN 0 ELSE 1 END
-       LIMIT 1`;
-
-// Observations are capped because an entity's history is unbounded: a bulk
-// import left one entity holding 711 observations / ~460k characters, and
-// returning all of them put ~115k tokens into the caller's context in a single
-// call. The full count is always reported so callers can tell they're seeing a
-// window, and `limit: null` still returns everything for deliberate exports.
-export async function getEntity(name, project = null, { limit = 50 } = {}) {
-  return withSession(async (session) => {
-    const result = await session.run(
-      `${RESOLVE_ENTITY_MATCH}
-       OPTIONAL MATCH (o:Observation)-[:ABOUT]->(e)
-       WITH e, o ORDER BY o.createdAt DESC
-       WITH e, collect(CASE WHEN o IS NULL THEN NULL ELSE {id: o.id, text: o.text, subsystem: o.subsystem, createdAt: toString(o.createdAt)} END) AS observationsRaw
-       WITH e, [x IN observationsRaw WHERE x IS NOT NULL] AS allObservations
-       WITH e, allObservations, size(allObservations) AS observationCount
-       WITH e, observationCount,
-            CASE WHEN $limit IS NULL THEN allObservations ELSE allObservations[0..$limit] END AS observations
-       OPTIONAL MATCH (e)-[r:RELATES_TO]->(out)
-       WITH e, observations, observationCount, collect(DISTINCT CASE WHEN r IS NULL THEN NULL ELSE {type: r.type, entity: out.name} END) AS outgoingRaw
-       WITH e, observations, observationCount, [x IN outgoingRaw WHERE x IS NOT NULL] AS outgoing
-       OPTIONAL MATCH (e)<-[r2:RELATES_TO]-(in)
-       WITH e, observations, observationCount, outgoing, collect(DISTINCT CASE WHEN r2 IS NULL THEN NULL ELSE {type: r2.type, entity: in.name} END) AS incomingRaw
-       WITH e, observations, observationCount, outgoing, [x IN incomingRaw WHERE x IS NOT NULL] AS incoming
-       RETURN e.name AS name, e.type AS type, e.project AS project, observations, observationCount, outgoing, incoming`,
-      { name, project: project ?? null, limit: limit === null ? null : int(limit) }
-    );
-    const entity = result.records[0]?.toObject() ?? null;
-    if (!entity) return null;
-    const observations = entity.observations.map((o) => ({
-      ...o,
-      text: truncateText(o.text, BUDGETS.entityTextChars),
+export async function listProjects() {
+  return getDb()
+    .prepare(
+      `SELECT e.project AS project, count(DISTINCT e.id) AS entityCount, count(o.rowid) AS observationCount,
+              max(o.created_at) AS lastActivity
+       FROM entities e LEFT JOIN observations o ON o.entity_id = e.id
+       WHERE e.project != ''
+       GROUP BY e.project
+       ORDER BY lastActivity DESC`
+    )
+    .all()
+    .map((row) => ({
+      project: row.project,
+      entityCount: row.entityCount,
+      observationCount: row.observationCount,
+      lastActivity: iso(row.lastActivity),
     }));
-    return { ...entity, observations: fitToBudget(observations, BUDGETS.entityTotalChars).kept };
-  });
+}
+
+// Prefers the entity in this project, then a global one of the same name, so
+// get and delete always agree on which same-named entity they mean.
+function resolveEntity(db, name, project) {
+  return db
+    .prepare(
+      `SELECT e.id AS id, e.name AS name, e.type AS type, e.project AS project
+       FROM entities e WHERE e.name = :name AND ${IN_SCOPE}
+       ORDER BY CASE WHEN e.project = :project THEN 0 ELSE 1 END, e.id
+       LIMIT 1`
+    )
+    .get({ name, project: project ?? null });
+}
+
+const asRelation = (row) => ({ type: row.type, entity: row.entity });
+
+// Observations are capped because an entity's history is unbounded; the full
+// count is always reported, and `limit: null` still returns everything.
+export async function getEntity(name, project = null, { limit = 50 } = {}) {
+  const db = getDb();
+  const entity = resolveEntity(db, name, project);
+  if (!entity) {
+    return null;
+  }
+  const all = db
+    .prepare("SELECT id, text, subsystem, created_at FROM observations WHERE entity_id = ? ORDER BY created_at DESC, rowid DESC")
+    .all(entity.id);
+  const shown = (limit === null ? all : all.slice(0, limit)).map((o) => ({
+    id: o.id,
+    text: truncateText(o.text, BUDGETS.entityTextChars),
+    subsystem: o.subsystem,
+    createdAt: iso(o.created_at),
+  }));
+  const outgoing = db
+    .prepare("SELECT r.type AS type, b.name AS entity FROM relations r JOIN entities b ON b.id = r.to_id WHERE r.from_id = ? ORDER BY r.type, b.name")
+    .all(entity.id)
+    .map(asRelation);
+  const incoming = db
+    .prepare("SELECT r.type AS type, a.name AS entity FROM relations r JOIN entities a ON a.id = r.from_id WHERE r.to_id = ? ORDER BY r.type, a.name")
+    .all(entity.id)
+    .map(asRelation);
+  return {
+    name: entity.name,
+    type: entity.type,
+    project: shownProject(entity.project),
+    observations: fitToBudget(shown, BUDGETS.entityTotalChars).kept,
+    observationCount: all.length,
+    outgoing,
+    incoming,
+  };
 }
 
 export async function getRecentContext({ project, limit = 15, subsystem = null }) {
-  const filter = parseSubsystemFilter(subsystem);
-  return withSession(async (session) => {
-    const result = await session.run(
-      `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
-       WHERE ($project IS NULL OR e.project = $project OR e.project IS NULL)
-         AND ${subsystemFilter("o")}
-       WITH e, o ORDER BY o.createdAt DESC
-       WITH e, collect({text: o.text, subsystem: o.subsystem})[0..3] AS observations, max(o.createdAt) AS lastSeen
-       ORDER BY lastSeen DESC
-       LIMIT $limit
-       RETURN e.name AS name, e.type AS type, observations
-       ORDER BY lastSeen DESC`,
-      { project: project ?? null, limit: int(limit), ...filter }
-    );
-    // Budgeted tightest of any read path: this used to be the SessionStart
-    // injection, which now renders from getPinnedFacts + getSubsystemMap.
-    const rows = result.records.map((r) => {
-      const row = r.toObject();
-      return {
-        ...row,
-        observations: row.observations.map((o) => ({ ...o, text: truncateText(o.text, BUDGETS.recentTextChars) })),
-      };
-    });
-    return fitToBudget(rows, BUDGETS.recentTotalChars).kept;
-  });
+  const db = getDb();
+  const filter = filterParams(subsystem);
+  const entities = db
+    .prepare(
+      `SELECT e.id AS id, e.name AS name, e.type AS type, max(o.created_at) AS lastSeen
+       FROM observations o JOIN entities e ON e.id = o.entity_id
+       WHERE ${IN_SCOPE} AND ${SUBSYSTEM_FILTER}
+       GROUP BY e.id
+       ORDER BY lastSeen DESC, e.id DESC
+       LIMIT :limit`
+    )
+    .all({ project: project ?? null, ...filter, limit });
+  const newest = db.prepare(
+    `SELECT o.text AS text, o.subsystem AS subsystem FROM observations o
+     WHERE o.entity_id = :id AND ${SUBSYSTEM_FILTER}
+     ORDER BY o.created_at DESC, o.rowid DESC LIMIT 3`
+  );
+  const rows = entities.map((entity) => ({
+    name: entity.name,
+    type: entity.type,
+    observations: newest
+      .all({ id: entity.id, ...filter })
+      .map((o) => ({ text: truncateText(o.text, BUDGETS.recentTextChars), subsystem: o.subsystem })),
+  }));
+  return fitToBudget(rows, BUDGETS.recentTotalChars).kept;
 }
 
-// Entity types whose observations always apply, whatever this session is about.
-// Matched by prefix against `type` rather than against the name, because the two
-// drift in real data: "architecture:docker-env-to-config" is typed "decision",
-// and one live entity is typed "Constraint Amendment". `type` is what the
-// extraction model sets deliberately; the name prefix is decoration.
-const PINNED_TYPES = ["user", "preference", "constraint", "convention"];
-
-// Shared by the count and the fetch so the two can never disagree about what
-// "pinned" means - a `total` computed from a different predicate than the rows
-// would be worse than no total at all.
-const PINNED_MATCH = `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
-       WHERE ($project IS NULL OR e.project = $project OR e.project IS NULL)
-         AND (any(t IN $types WHERE toLower(coalesce(e.type, '')) STARTS WITH t) OR e.name = 'user')`;
-
-/**
- * The standing preferences and constraints injected verbatim at SessionStart.
- * These are cross-cutting by nature and worthless if the model has to go looking
- * for them, which is why they are the one thing the injection still quotes in
- * full rather than merely indexing.
- *
- * Returns {facts, total, returned, truncated} rather than a bare array, for the
- * same reason getTimeline does: a caller that silently receives half the
- * standing facts will confidently act as though it has all of them. `limit` is a
- * driver-level safety valve set far above what the character budget will ever
- * pass, not the effective bound - the budget is.
- */
-export async function getPinnedFacts({ project, limit = 100 } = {}) {
-  return withSession(async (session) => {
-    const params = { project: project ?? null, types: PINNED_TYPES };
-    const countResult = await session.run(`${PINNED_MATCH} RETURN count(o) AS total`, params);
-    const total = countResult.records[0]?.get("total")?.toNumber() ?? 0;
-
-    const result = await session.run(
-      `${PINNED_MATCH}
-       WITH e, o ORDER BY o.createdAt DESC
-       LIMIT $limit
-       RETURN e.name AS entity, e.type AS type, o.text AS text`,
-      { ...params, limit: int(limit) }
-    );
-    const rows = result.records.map((r) => {
-      const row = r.toObject();
-      return { ...row, text: truncateText(row.text, BUDGETS.pinnedTextChars) };
-    });
-    const { kept } = fitToBudget(rows, BUDGETS.pinnedTotalChars);
-    return { facts: kept, total, returned: kept.length, truncated: kept.length < total };
-  });
-}
-
-export async function deleteObservations(entity, observationIds, project = null) {
-  return withSession(async (session) => {
-    const result = await session.run(
-      `${RESOLVE_ENTITY_MATCH.replace("$name", "$entity")}
-       MATCH (e)<-[:ABOUT]-(o:Observation)
-       WHERE o.id IN $observationIds
-       DETACH DELETE o
-       RETURN count(o) AS deleted`,
-      { entity, observationIds, project: project ?? null }
-    );
-    return result.records[0]?.get("deleted").toNumber() ?? 0;
-  });
-}
-
-export async function deleteEntity(entity, project = null) {
-  return withSession(async (session) => {
-    await session.run(
-      `${RESOLVE_ENTITY_MATCH.replace("$name", "$entity")}
-       OPTIONAL MATCH (e)<-[:ABOUT]-(o:Observation)
-       DETACH DELETE e, o`,
-      { entity, project: project ?? null }
-    );
-  });
-}
-
-/**
- * Chronological observation history. Returns {events, total, returned,
- * truncated} rather than a bare array: callers summarize the result, and
- * summarizing a silently-trimmed history produces a confidently incomplete
- * narrative. `total` is the true match count so the caller can page with
- * `since` instead of raising `limit` and paying for the whole history at once.
- */
+// Returns {events, total, returned, truncated}: callers summarize the result,
+// and summarizing a silently trimmed history gives a confidently incomplete one.
 export async function getTimeline({
   project,
   since,
@@ -444,95 +260,195 @@ export async function getTimeline({
   maxTextChars = BUDGETS.timelineTextChars,
   maxTotalChars = BUDGETS.timelineTotalChars,
 } = {}) {
-  const filter = parseSubsystemFilter(subsystem);
-  return withSession(async (session) => {
-    const countResult = await session.run(
-      `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
-       WHERE ($project IS NULL OR e.project = $project OR e.project IS NULL)
-         AND ($since IS NULL OR o.createdAt >= datetime($since))
-         AND ${subsystemFilter("o")}
-       RETURN count(o) AS total`,
-      { project: project ?? null, since: since ?? null, ...filter }
-    );
-    const total = countResult.records[0]?.get("total")?.toNumber() ?? 0;
+  const sinceMs = since === null || since === undefined ? null : Date.parse(since);
+  if (Number.isNaN(sinceMs)) {
+    throw new Error(`since is not a date: ${since}`);
+  }
+  const db = getDb();
+  const params = { project: project ?? null, since: sinceMs, ...filterParams(subsystem) };
+  const where = `${IN_SCOPE} AND (:since IS NULL OR o.created_at >= :since) AND ${SUBSYSTEM_FILTER}`;
+  const { total } = db
+    .prepare(`SELECT count(*) AS total FROM observations o JOIN entities e ON e.id = o.entity_id WHERE ${where}`)
+    .get(params);
+  const events = db
+    .prepare(
+      `SELECT e.name AS entity, e.type AS type, o.text AS text, o.created_at AS createdAt
+       FROM observations o JOIN entities e ON e.id = o.entity_id WHERE ${where}
+       ORDER BY o.created_at ASC, o.rowid ASC LIMIT :limit`
+    )
+    .all({ ...params, limit })
+    .map((row) => ({ entity: row.entity, type: row.type, text: truncateText(row.text, maxTextChars), createdAt: iso(row.createdAt) }));
+  const { kept } = fitToBudget(events, maxTotalChars);
+  return { events: kept, total, returned: kept.length, truncated: kept.length < total };
+}
 
-    const result = await session.run(
-      `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
-       WHERE ($project IS NULL OR e.project = $project OR e.project IS NULL)
-         AND ($since IS NULL OR o.createdAt >= datetime($since))
-         AND ${subsystemFilter("o")}
-       RETURN e.name AS entity, e.type AS type, o.text AS text, toString(o.createdAt) AS createdAt
-       ORDER BY o.createdAt ASC
-       LIMIT $limit`,
-      { project: project ?? null, since: since ?? null, limit: int(limit), ...filter }
-    );
+// Deletes observations by rowid together with their full-text rows.
+function removeObservationRows(db, rowids) {
+  const dropText = db.prepare("DELETE FROM observation_text_fts WHERE rowid = ?");
+  const drop = db.prepare("DELETE FROM observations WHERE rowid = ?");
+  for (const rowid of rowids) {
+    dropText.run(rowid);
+    drop.run(rowid);
+  }
+}
 
-    const rows = result.records.map((r) => {
-      const row = r.toObject();
-      return { ...row, text: truncateText(row.text, maxTextChars) };
-    });
-    const { kept } = fitToBudget(rows, maxTotalChars);
-    return { events: kept, total, returned: kept.length, truncated: kept.length < total };
+export async function deleteObservations(entity, observationIds, project = null) {
+  const db = getDb();
+  const target = resolveEntity(db, entity, project);
+  if (!target || observationIds.length === 0) {
+    return 0;
+  }
+  const marks = observationIds.map(() => "?").join(", ");
+  return inTransaction(db, () => {
+    const doomed = db
+      .prepare(`SELECT rowid AS rid FROM observations WHERE entity_id = ? AND id IN (${marks})`)
+      .all(target.id, ...observationIds);
+    removeObservationRows(db, doomed.map((row) => row.rid));
+    return doomed.length;
   });
 }
 
-// Deletes observations older than `olderThanDays`, keeping the most recent
-// `keepPerEntity` on every entity regardless of age (so an entity never gets
-// wiped down to nothing just because nobody's touched it in a while).
+// Its relations go with it through ON DELETE CASCADE.
+export async function deleteEntity(entity, project = null) {
+  const db = getDb();
+  const target = resolveEntity(db, entity, project);
+  if (!target) {
+    return;
+  }
+  inTransaction(db, () => {
+    const rowids = db.prepare("SELECT rowid AS rid FROM observations WHERE entity_id = ?").all(target.id).map((row) => row.rid);
+    removeObservationRows(db, rowids);
+    db.prepare("DELETE FROM entity_name_fts WHERE rowid = ?").run(target.id);
+    db.prepare("DELETE FROM entities WHERE id = ?").run(target.id);
+  });
+}
+
+// Deletes observations older than `olderThanDays`, keeping each entity's
+// newest `keepPerEntity` of those old ones, so an entity is never wiped down to
+// nothing just because nobody touched it in a while.
 export async function pruneObservations({ project, olderThanDays = 180, keepPerEntity = 3, dryRun = false }) {
-  return withSession(async (session) => {
-    const result = await session.run(
-      `MATCH (o:Observation)-[:ABOUT]->(e:Entity)
-       WHERE ($project IS NULL OR e.project = $project OR e.project IS NULL)
-         AND o.createdAt < datetime() - duration({days: $olderThanDays})
-       WITH e, o ORDER BY o.createdAt DESC
-       WITH e, collect(o) AS obs
-       WITH e, obs[$keepPerEntity..] AS stale
-       UNWIND stale AS o
-       WITH o, o.id AS id, o.text AS text
-       ${dryRun ? "" : "DETACH DELETE o"}
-       RETURN count(o) AS pruned, collect({id: id, text: text})[0..20] AS sample`,
-      { project: project ?? null, olderThanDays, keepPerEntity: int(keepPerEntity) }
-    );
-    const record = result.records[0];
-    return {
-      pruned: record?.get("pruned")?.toNumber() ?? 0,
-      sample: record?.get("sample") ?? [],
-    };
-  });
+  const db = getDb();
+  const stale = db
+    .prepare(
+      `WITH old AS (
+         SELECT o.rowid AS rid, o.id AS id, o.text AS text,
+                row_number() OVER (PARTITION BY o.entity_id ORDER BY o.created_at DESC, o.rowid DESC) AS position
+         FROM observations o JOIN entities e ON e.id = o.entity_id
+         WHERE ${IN_SCOPE} AND o.created_at < :cutoff
+       )
+       SELECT rid, id, text FROM old WHERE position > :keep ORDER BY rid`
+    )
+    .all({ project: project ?? null, cutoff: Date.now() - olderThanDays * 86_400_000, keep: keepPerEntity });
+  if (!dryRun) {
+    inTransaction(db, () => removeObservationRows(db, stale.map((row) => row.rid)));
+  }
+  return { pruned: stale.length, sample: stale.slice(0, 20).map((row) => ({ id: row.id, text: row.text })) };
 }
 
-export async function listProjects() {
-  return withSession(async (session) => {
-    const result = await session.run(
-      `MATCH (e:Entity)
-       WHERE e.project IS NOT NULL
-       OPTIONAL MATCH (o:Observation)-[:ABOUT]->(e)
-       WITH e.project AS project, count(DISTINCT e) AS entityCount, count(o) AS observationCount, max(o.createdAt) AS lastActivity
-       RETURN project, entityCount, observationCount, toString(lastActivity) AS lastActivity
-       ORDER BY lastActivity DESC`
-    );
-    return result.records.map((r) => ({
-      project: r.get("project"),
-      entityCount: r.get("entityCount").toNumber(),
-      observationCount: r.get("observationCount").toNumber(),
-      lastActivity: r.get("lastActivity"),
-    }));
-  });
+// Entity types whose observations always apply, matched by prefix against
+// `type` (one live entity is typed "Constraint Amendment"), plus the entity
+// named "user".
+const PINNED_TYPES = ["user", "preference", "constraint", "convention"];
+const PINNED_WHERE = `${IN_SCOPE} AND (${PINNED_TYPES.map((type) => `lower(coalesce(e.type, '')) LIKE '${type}%'`).join(" OR ")} OR e.name = 'user')`;
+
+// Measured on 693 standing facts (engine spec, "Fix 2"): every pair at 0.8 or
+// more was a repeat, and the next pair down (0.73) was two different tickets.
+// Reworded repeats score as low as 0.33, below pairs that genuinely differ, so
+// they are only listed for review (0.3), never collapsed.
+export const REPEAT_COLLAPSE_OVERLAP = 0.8;
+export const REPEAT_REVIEW_OVERLAP = 0.3;
+
+// Rows arrive newest first, so the newest of each group of repeats is kept.
+function collapseRepeats(rows) {
+  const facts = [];
+  let collapsed = 0;
+  for (const row of rows) {
+    if (facts.some((kept) => wordOverlap(kept.text, row.text) >= REPEAT_COLLAPSE_OVERLAP)) {
+      collapsed += 1;
+    } else {
+      facts.push(row);
+    }
+  }
+  return { facts, collapsed };
 }
 
-export async function getStatus({ project }) {
-  return withSession(async (session) => {
-    const result = await session.run(
-      `MATCH (e:Entity) WHERE $project IS NULL OR e.project = $project OR e.project IS NULL
-       OPTIONAL MATCH (o:Observation)-[:ABOUT]->(e)
-       RETURN count(DISTINCT e) AS entityCount, count(o) AS observationCount`,
-      { project: project ?? null }
-    );
-    const record = result.records[0];
-    return {
-      entityCount: record?.get("entityCount")?.toNumber() ?? 0,
-      observationCount: record?.get("observationCount")?.toNumber() ?? 0,
-    };
-  });
+/**
+ * The standing facts injected verbatim at SessionStart, repeats collapsed.
+ * `total` counts every eligible fact, `collapsed` the repeats hidden on purpose,
+ * and `truncated` says whether the budget or `limit` cut any of the rest.
+ */
+export async function getPinnedFacts({ project, limit = 100 } = {}) {
+  const db = getDb();
+  const params = { project: project ?? null };
+  const { total } = db
+    .prepare(`SELECT count(*) AS total FROM observations o JOIN entities e ON e.id = o.entity_id WHERE ${PINNED_WHERE}`)
+    .get(params);
+  const rows = db
+    .prepare(
+      `SELECT e.name AS entity, e.type AS type, o.text AS text
+       FROM observations o JOIN entities e ON e.id = o.entity_id WHERE ${PINNED_WHERE}
+       ORDER BY o.created_at DESC, o.rowid DESC LIMIT :limit`
+    )
+    .all({ ...params, limit });
+  const { facts, collapsed } = collapseRepeats(rows);
+  const shown = facts.map((row) => ({ entity: row.entity, type: row.type, text: truncateText(row.text, BUDGETS.pinnedTextChars) }));
+  const { kept } = fitToBudget(shown, BUDGETS.pinnedTotalChars);
+  return { facts: kept, total, collapsed, returned: kept.length, truncated: kept.length < total - collapsed };
+}
+
+const shownFact = (row) => ({ entity: row.entity, project: shownProject(row.project), id: row.id, createdAt: iso(row.createdAt), text: row.text });
+
+/**
+ * Standing facts that are likely repeats of each other, most similar first,
+ * for a person to merge or delete. With no project, only facts from the same
+ * scope are paired: a fact repeated across projects is never seen twice.
+ */
+export async function findRepeatedFacts({ project = null, min = REPEAT_REVIEW_OVERLAP } = {}) {
+  const facts = getDb()
+    .prepare(
+      `SELECT e.name AS entity, e.project AS project, o.id AS id, o.text AS text, o.created_at AS createdAt
+       FROM observations o JOIN entities e ON e.id = o.entity_id WHERE ${PINNED_WHERE}
+       ORDER BY o.created_at DESC, o.rowid DESC`
+    )
+    .all({ project: project ?? null });
+  const pairs = [];
+  for (let i = 0; i < facts.length; i++) {
+    for (let j = i + 1; j < facts.length; j++) {
+      const sameScope = project !== null || facts[i].project === facts[j].project;
+      const similarity = sameScope ? wordOverlap(facts[i].text, facts[j].text) : 0;
+      if (sameScope && similarity >= min) {
+        pairs.push({ similarity, newer: shownFact(facts[i]), older: shownFact(facts[j]) });
+      }
+    }
+  }
+  return pairs.sort((a, b) => b.similarity - a.similarity);
+}
+
+const withoutProject = ({ project, ...row }) => row;
+const withoutMatchCount = ({ matchedQueryWords, ...row }) => row;
+
+function buildSearchEnvelope(rows, query) {
+  // Capped before budgeting, so the budget sees the real payload size.
+  const capped = capRelations(rows.map(withoutProject), query, resolveRelationCap());
+  const kept = fitToBudget(capped, BUDGETS.searchTotalChars).kept;
+  const relevance = classifyRelevance(kept, query);
+  const results = kept.map(withoutMatchCount);
+  const score = topScore(results);
+  const envelope = { results, relevance, topScore: score };
+  const note = describeRelevance(relevance);
+  if (note) {
+    envelope.note = note;
+  }
+  return envelope;
+}
+
+export async function searchMemory(query, limit = 10, project = null, { subsystem = null } = {}) {
+  const filter = parseSubsystemFilter(subsystem);
+  const db = getDb();
+  const envelope = buildSearchEnvelope(searchRows(db, { query, limit, project, filter }), query);
+  if (!shouldFallBack({ project, relevance: envelope.relevance })) {
+    return envelope;
+  }
+  const other = otherProjectResults(searchRows(db, { query, limit, project: null, filter }), project, query);
+  return other ? { ...envelope, otherProjects: other } : envelope;
 }

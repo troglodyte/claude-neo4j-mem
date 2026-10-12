@@ -1,19 +1,19 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { ensureSchema } from "../src/lib/schema.js";
-import { closeDriver } from "../src/lib/neo4jClient.js";
+import { useTempStore } from "./helpers/tempStore.js";
+import { closeDb } from "../src/lib/memoryStore.js";
 import * as graph from "../src/lib/graph.js";
 
 const PROJECT = "test:subsystem";
 
 before(async () => {
-  await ensureSchema();
+  useTempStore();
   await graph.deleteEntity("test:tagged", PROJECT);
 });
 
 after(async () => {
   await graph.deleteEntity("test:tagged", PROJECT);
-  await closeDriver();
+  closeDb();
 });
 
 test("addObservations stores a per-observation subsystem", async () => {
