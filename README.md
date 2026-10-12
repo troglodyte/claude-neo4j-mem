@@ -68,9 +68,14 @@ ever inserts, so nothing deleted in SQLite comes back.
 
 ## Moving a machine off Neo4j
 
-1. Leave Neo4j running and install the plugin (above).
+1. Leave Neo4j running and install the plugin (above). If an older version is already
+   installed, update it instead: run
+   `claude plugin marketplace update claude-neo4j-local`, then
+   `claude plugin update neo4j-memory@claude-neo4j-local`. Without the first, the update
+   does not see the new version. Check the new install path for `node_modules` as above.
 2. Start one Claude Code session. Wait until `~/.claude-neo4j/state/migrate.log` says
-   `memory moved`.
+   `memory moved`. To move it now instead, run `npm run migrate-to-sqlite` in the
+   install path; it ends with `PASS` and `memory moved`.
 3. In the install path, run `npm run health`. Every check should PASS, and `migration`
    should read `last passed`.
 4. Run `npm run backup`.
