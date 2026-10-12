@@ -50,14 +50,17 @@ move's record:
 - **No store, and Neo4j settings** (a password in `~/.claude-neo4j/config.json`, or
   `NEO4J_PASSWORD`): session start moves the graph across in the background, which takes
   about a minute. Meanwhile the memory tools answer "memory is moving to SQLite", and
-  captures wait for a later session start. The move builds `memory.sqlite.migrating`,
-  checks every row against Neo4j, and renames it into place only if the check passes.
+  captures wait for a later session start. Each move builds its own
+  `memory.sqlite.migrating-<run>`, checks every row against Neo4j, and puts it in place
+  only if the check passes, never over an existing store. If Neo4j could not be read, the
+  next session start tries again.
 - **Neo4j settings, but Neo4j is down**: memory stays off. Start it once
   (`scripts/setup-local.sh`) so the move can run, or run `npm run memory -- start-fresh`
   to begin with an empty store and leave Neo4j untouched.
 - **The last move failed**: memory stays off, and session start names the reason and the
   log, `~/.claude-neo4j/state/migrate.log`. The staged file and its report are kept.
-  Fix the cause, then run `npm run migrate-to-sqlite`.
+  Fix the cause, then run `npm run migrate-to-sqlite`, which moves the graph the same
+  careful way.
 
 Sessions that were already open keep writing to Neo4j until they end. For 7 days after
 the move, each session start copies those new rows across in the background. It only

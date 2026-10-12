@@ -54,3 +54,15 @@ test("a machine with a Neo4j config but Neo4j down keeps memory off and creates 
   assert.match(out.systemMessage, /Memory: off — Neo4j is not running/);
   assert.equal(fs.existsSync(store), false);
 });
+
+test("claude-mem history no longer prompts an import that cannot reach the SQLite store", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const out = await runSessionStart({}, (home) => {
+    fs.mkdirSync(path.join(home, ".claude-mem"), { recursive: true });
+    const db = new DatabaseSync(path.join(home, ".claude-mem", "claude-mem.db"));
+    db.exec("CREATE TABLE observations (project TEXT); CREATE TABLE session_summaries (project TEXT);");
+    db.prepare("INSERT INTO observations (project) VALUES (?)").run(path.basename(home));
+    db.close();
+  });
+  assert.doesNotMatch(out.systemMessage, /migrate-claude-mem/);
+});

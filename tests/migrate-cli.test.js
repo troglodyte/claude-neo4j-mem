@@ -33,3 +33,11 @@ test("an unknown flag exits 2 with the usage line", () => {
   assert.equal(status, 2);
   assert.match(stderr, /usage: migrate-to-sqlite/);
 });
+
+test("with no --out, the move runs through the first-start worker and records its outcome", () => {
+  const { status, home } = runCli([]);
+  assert.equal(status, 2);
+  const record = JSON.parse(fs.readFileSync(path.join(home, ".claude-neo4j", "state", "migrate.json"), "utf8"));
+  assert.equal(record.result, "could-not-run");
+  assert.equal(fs.existsSync(path.join(home, ".claude-neo4j", "memory.sqlite")), false);
+});

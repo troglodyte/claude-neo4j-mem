@@ -45,13 +45,14 @@ export async function migrateFromNeo4j({ out, checkOnly = false, reportPath, log
       if (config.mode === "remote") {
         warn(`Warning: the source is a remote graph (${source}); the SQLite file serves this machine only.`);
       }
-      const { exitCode } = await runMigration({ readOnce, out, checkOnly, reportPath, sourceLabel: `${source} (${config.mode})`, log });
-      return { exitCode };
+      const result = await runMigration({ readOnce, out, checkOnly, reportPath, sourceLabel: `${source} (${config.mode})`, log });
+      // Could-not-run without validation problems is a read or write that may work next time.
+      return { exitCode: result.exitCode, transient: result.exitCode === EXIT.COULD_NOT_RUN && !result.problems };
     });
   } catch (error) {
     if (error instanceof Neo4jUnreachableError) {
       warn(error.message);
-      return { exitCode: EXIT.COULD_NOT_RUN };
+      return { exitCode: EXIT.COULD_NOT_RUN, transient: true };
     }
     throw error;
   }

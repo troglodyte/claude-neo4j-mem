@@ -12,13 +12,15 @@ import { openMemoryDb } from "./sqliteDb.js";
 // Spec: docs/superpowers/specs/2026-10-09-sqlite-engine-design.md, "First start".
 
 export const LOCK_STALE_MS = 30 * 60 * 1000;
+// A lock file is created empty and then written; for this long an unreadable one still counts as held.
+const LOCK_SETTLE_MS = 5000;
 export const MOVING_MESSAGE = "memory is moving to SQLite; try again in a minute";
 
 const lockPath = (stateDir) => path.join(stateDir, "migrate.lock");
 const recordPath = (stateDir) => path.join(stateDir, "migrate.json");
 
-/** The file the first-start worker builds and renames into place on a passed check. */
-export const stagedPath = (dbPath = memoryDbPath()) => `${dbPath}.migrating`;
+/** The file one first-start worker builds; each run has its own, so two workers never share a build. */
+export const stagedPath = (dbPath, token) => `${dbPath}.migrating-${token}`;
 
 /** A machine has a Neo4j config when config.json holds a password or NEO4J_PASSWORD is set. */
 export function hasNeo4jConfig({ env = process.env, config = readConfigFile() } = {}) {
@@ -35,13 +37,22 @@ function alive(pid) {
   }
 }
 
-/** The lock's holder, or null when it is free or stale (its pid gone, or older than 30 minutes). */
-export function lockHolder({ stateDir = STATE_DIR, now = Date.now() } = {}) {
-  let lock;
+// The holder recorded in a lock file, or null when the file is stale: its pid gone,
+// older than 30 minutes, or unreadable for longer than a write takes.
+function holderOf(file, now) {
+  let text;
+  let stat;
   try {
-    lock = JSON.parse(fs.readFileSync(lockPath(stateDir), "utf8"));
+    text = fs.readFileSync(file, "utf8");
+    stat = fs.statSync(file);
   } catch {
     return null;
+  }
+  let lock;
+  try {
+    lock = JSON.parse(text);
+  } catch {
+    return now - stat.mtimeMs < LOCK_SETTLE_MS ? { pid: null, startedAt: stat.mtimeMs } : null;
   }
   if (!Number.isInteger(lock?.pid) || !alive(lock.pid) || now - lock.startedAt > LOCK_STALE_MS) {
     return null;
@@ -49,21 +60,49 @@ export function lockHolder({ stateDir = STATE_DIR, now = Date.now() } = {}) {
   return lock;
 }
 
+/** The lock's holder, or null when it is free or stale (its pid gone, or older than 30 minutes). */
+export function lockHolder({ stateDir = STATE_DIR, now = Date.now() } = {}) {
+  return holderOf(lockPath(stateDir), now);
+}
+
 /** Takes the lock for `pid`; false when a live holder has it. A stale lock is reclaimed. */
 export function acquireLock({ stateDir = STATE_DIR, pid = process.pid, now = Date.now() } = {}) {
   fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const file = lockPath(stateDir);
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      fs.writeFileSync(lockPath(stateDir), JSON.stringify({ pid, startedAt: now }), { flag: "wx", mode: 0o600 });
+      fs.writeFileSync(file, JSON.stringify({ pid, startedAt: now }), { flag: "wx", mode: 0o600 });
       return true;
     } catch (error) {
       if (error.code !== "EEXIST") {
         throw error;
       }
-      if (lockHolder({ stateDir, now })) {
-        return false;
+    }
+    if (holderOf(file, now)) {
+      return false;
+    }
+    // Reclaim by renaming the stale lock aside: only one taker's rename succeeds, and a
+    // lock someone took in the meantime is put back instead of being deleted.
+    const aside = `${file}.stale-${pid}-${attempt}`;
+    try {
+      fs.renameSync(file, aside);
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        continue;
       }
-      fs.rmSync(lockPath(stateDir), { force: true });
+      throw error;
+    }
+    const taken = holderOf(aside, now);
+    if (taken) {
+      try {
+        fs.linkSync(aside, file);
+      } catch {
+        // someone else already holds the slot
+      }
+    }
+    fs.rmSync(aside, { force: true });
+    if (taken) {
+      return false;
     }
   }
   return false;

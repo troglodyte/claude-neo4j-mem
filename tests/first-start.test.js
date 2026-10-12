@@ -146,3 +146,15 @@ test("a running migration or a failed one is reported without starting another",
   assert.match(await beginFirstStart({ ...failed, spawnWorker: spy.spawnWorker, probe: async () => true }), /failed \(boom\)/);
   assert.deepEqual(spy.calls, []);
 });
+
+test("a lock file still being written counts as held for a few seconds, then as stale", () => {
+  const m = machine();
+  fs.mkdirSync(m.stateDir, { recursive: true });
+  const lock = path.join(m.stateDir, "migrate.lock");
+  fs.writeFileSync(lock, "");
+  assert.notEqual(lockHolder({ stateDir: m.stateDir }), null);
+  assert.equal(storeState(m).state, "migrating");
+  const old = new Date(Date.now() - 60_000);
+  fs.utimesSync(lock, old, old);
+  assert.equal(lockHolder({ stateDir: m.stateDir }), null);
+});
