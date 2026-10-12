@@ -1,5 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
+import net from "node:net";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { STATE_DIR, memoryDbPath, readConfigFile } from "./config.js";
 import { openMemoryDb } from "./sqliteDb.js";
 
@@ -137,4 +140,66 @@ export function startFresh({ dbPath = memoryDbPath(), stateDir = STATE_DIR, now 
   openMemoryDb(dbPath).close();
   writeRecord({ result: "started-fresh", finishedAt: now }, stateDir);
   return `started an empty store at ${dbPath}; Neo4j is untouched`;
+}
+
+export const MOVING_LINE = "moving to SQLite; memory is off for about a minute.";
+export const UNREACHABLE_LINE =
+  "Neo4j is not running, so memory cannot move to SQLite yet. Start it once (scripts/setup-local.sh) so memory can move, " +
+  "or run `npm run memory -- start-fresh` to begin empty with Neo4j left untouched.";
+
+const WORKER = fileURLToPath(new URL("../../scripts/first-start-migrate.mjs", import.meta.url));
+
+/** Whether the configured Neo4j accepts a TCP connection; a quick probe, not a login. */
+export function neo4jReachable({ env = process.env, config = readConfigFile(), timeoutMs = 1500 } = {}) {
+  let host;
+  let port;
+  try {
+    const url = new URL(env.NEO4J_URI ?? config?.uri ?? "bolt://localhost:7687");
+    host = url.hostname;
+    port = Number(url.port) || 7687;
+  } catch {
+    return Promise.resolve(false);
+  }
+  return new Promise((resolve) => {
+    const socket = net.connect({ host, port });
+    const done = (ok) => {
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.setTimeout(timeoutMs, () => done(false));
+    socket.once("connect", () => done(true));
+    socket.once("error", () => done(false));
+  });
+}
+
+/** Detaches the first-start worker; its output goes to state/migrate.log. */
+export function spawnMigrationWorker({ stateDir = STATE_DIR, nodePath = process.execPath } = {}) {
+  fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  const log = fs.openSync(path.join(stateDir, "migrate.log"), "a", 0o600);
+  try {
+    const child = spawn(nodePath, ["--disable-warning=ExperimentalWarning", WORKER], { detached: true, stdio: ["ignore", log, log] });
+    child.unref();
+    return child.pid;
+  } finally {
+    fs.closeSync(log);
+  }
+}
+
+/** Session start's first-start step: null when the store can be used, else the line to show. */
+export async function beginFirstStart({ probe = neo4jReachable, spawnWorker = spawnMigrationWorker, ...where } = {}) {
+  const status = storeState(where);
+  if (status.state === "ready" || status.state === "new") {
+    return null;
+  }
+  if (status.state === "migrating") {
+    return MOVING_LINE;
+  }
+  if (status.state === "failed") {
+    return offReason(status);
+  }
+  if (!(await probe())) {
+    return UNREACHABLE_LINE;
+  }
+  spawnWorker();
+  return MOVING_LINE;
 }

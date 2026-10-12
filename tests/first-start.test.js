@@ -14,6 +14,9 @@ import {
   startFresh,
   MOVING_MESSAGE,
   LOCK_STALE_MS,
+  beginFirstStart,
+  MOVING_LINE,
+  UNREACHABLE_LINE,
 } from "../src/lib/firstStart.js";
 import { getDb, closeDb } from "../src/lib/memoryStore.js";
 
@@ -104,4 +107,42 @@ test("the store gate will not create an empty store while memory should be movin
     delete process.env.NEO4J_PASSWORD;
     closeDb();
   }
+});
+
+const recorder = () => {
+  const calls = [];
+  return { calls, spawnWorker: () => calls.push("spawn") };
+};
+
+test("first start leaves a ready store or a new user alone", async () => {
+  const spy = recorder();
+  assert.equal(await beginFirstStart({ ...machine({ store: true }), spawnWorker: spy.spawnWorker, probe: async () => true }), null);
+  assert.equal(await beginFirstStart({ ...machine({ password: false }), spawnWorker: spy.spawnWorker, probe: async () => true }), null);
+  assert.deepEqual(spy.calls, []);
+});
+
+test("a pending machine with Neo4j reachable starts the worker and says memory is moving", async () => {
+  const spy = recorder();
+  assert.equal(await beginFirstStart({ ...machine(), spawnWorker: spy.spawnWorker, probe: async () => true }), MOVING_LINE);
+  assert.deepEqual(spy.calls, ["spawn"]);
+});
+
+test("a pending machine with Neo4j down names both ways forward and starts nothing", async () => {
+  const spy = recorder();
+  const line = await beginFirstStart({ ...machine(), spawnWorker: spy.spawnWorker, probe: async () => false });
+  assert.equal(line, UNREACHABLE_LINE);
+  assert.match(line, /setup-local\.sh.*start-fresh/);
+  assert.deepEqual(spy.calls, []);
+});
+
+test("a running migration or a failed one is reported without starting another", async () => {
+  const spy = recorder();
+  const running = machine();
+  acquireLock({ stateDir: running.stateDir });
+  assert.equal(await beginFirstStart({ ...running, spawnWorker: spy.spawnWorker, probe: async () => true }), MOVING_LINE);
+  releaseLock({ stateDir: running.stateDir });
+  const failed = machine();
+  writeRecord({ result: "failed", reason: "boom", log: "/x/migrate.log" }, failed.stateDir);
+  assert.match(await beginFirstStart({ ...failed, spawnWorker: spy.spawnWorker, probe: async () => true }), /failed \(boom\)/);
+  assert.deepEqual(spy.calls, []);
 });
