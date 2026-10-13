@@ -25,8 +25,7 @@ large `(untagged)` bucket. Every read tool returns each observation's `subsystem
 to enumerate the unclassified ones, so the diagnosis can be made in-session.
 
 Acting on it is a maintenance script, not an MCP tool, because reclassification is an
-LLM pass over every affected observation. The script is legacy and still works on the old
-Neo4j graph only, not the SQLite store: `npm run backfill-subsystems` tags whatever
+LLM pass over every affected observation. `npm run backfill-subsystems` tags whatever
 is currently untagged, and `--retag TAG` reclassifies observations already carrying a
 tag (`--retag general` is how a junk drawer gets emptied). Both take `--dry-run` to
 show the proposed tags without writing, and `--project NAME` to scope to one project.

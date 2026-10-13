@@ -11,6 +11,8 @@ release that doesn't move it never reaches any other project.
 - **Changed**: `npm run usage` reads the SQLite store (`scripts/memory-usage.mjs`,
   `src/lib/usageReport.js`) with the same table, totals and hygiene warnings; the Cypher
   `scripts/memory-usage.sh` is gone.
+- **Changed**: `npm run backfill-subsystems` reads and writes the SQLite store
+  (`src/lib/subsystemBackfill.js`), so the usage report's retag advice works again.
 
 ## 0.7.0 — 2026-10-12
 

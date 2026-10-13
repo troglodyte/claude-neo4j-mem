@@ -5,7 +5,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "backfill-subsystems": "node scripts/backfill-subsystems.mjs",
+    "backfill-subsystems": "bash bin/memory-node scripts/backfill-subsystems.mjs",
     "backup": "bash bin/memory-node scripts/backup.mjs",
     "configure": "node scripts/configure.mjs",
     "mcp-server": "bash bin/memory-node src/mcp/server.js",

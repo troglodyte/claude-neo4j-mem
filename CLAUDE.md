@@ -208,7 +208,8 @@ normal. Several ran that way before it was noticed.
   query/edit the graph from a terminal, outside a Claude session. Commands:
   `status`, `search`, `recent`, `get`, `add`, `relate`, `timeline`,
   `forget-obs`, `forget`. Run with no args for usage.
-- `npm run backfill-subsystems` (legacy) — tag pre-existing observations.
+- `npm run backfill-subsystems` — tag untagged observations, or `--retag TAG` to
+  reclassify one (`src/lib/subsystemBackfill.js` holds the store side).
 - `scripts/statusline.mjs` — shows `<model> · 🧠 <entities>e/<observations>o`,
   scoped to the current project. Wired via `statusLine` in
   `.claude/settings.local.json` (gitignored, personal), which is why it isn't

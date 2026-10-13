@@ -208,7 +208,7 @@ These reach the old Neo4j graph and stay until it is retired: `scripts/setup-loc
 and `npm run configure` (start and configure the container), `scripts/backup.sh`,
 `scripts/restore.sh` and `scripts/check-health.sh` (Neo4j dumps and checks),
 `npm run migrate-to-podman`, `scripts/cypher.sh`, `scripts/fingerprint.sh`,
-`npm run usage`, `npm run backfill-subsystems`, `npm run migrate-claude-mem`, and
+`npm run migrate-claude-mem`, and
 `docker/`. The container is `claude-neo4j-memory`, under Podman or Docker. Its
 credentials live in `docker/.env` and the Neo4j fields of `~/.claude-neo4j/config.json`.
 The full Neo4j setup guide is in this README as of 0.6.0, in git history.
