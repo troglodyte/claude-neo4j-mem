@@ -178,7 +178,8 @@ normal. Several ran that way before it was noticed.
   reconfigure or switch between local/remote (e.g. Neo4j Aura) manually.
 - `scripts/check-health.sh` (legacy) — verifies the whole stack end to end (container
   health, config, Neo4j auth, MCP handshake); prints PASS/FAIL per check.
-- `npm run usage` (legacy) (or `scripts/memory-usage.sh`) — cross-project usage report:
+- `npm run usage` — cross-project usage report over the SQLite store
+  (`src/lib/usageReport.js`):
   every project in the db with entity/observation counts, first-seen, obs in
   last 7 days, last activity, plus totals and hygiene warnings (duplicate
   project names, oversized entities, empty stubs, expensive subsystem maps,

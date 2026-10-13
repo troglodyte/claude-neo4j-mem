@@ -117,7 +117,7 @@ You do not need cypher-shell for everyday use — these work without it:
   npm run memory -- projects     list projects, counts, last activity
   npm run memory -- status       connection info + counts
   npm run memory -- search <q>   full-text search
-  scripts/memory-usage.sh        (needs cypher-shell; the CLI above does not)
+  npm run usage                  cross-project usage report (SQLite)
 
 To install cypher-shell:
   Debian/Ubuntu  sudo apt-get install cypher-shell

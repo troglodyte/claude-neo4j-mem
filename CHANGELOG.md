@@ -6,6 +6,12 @@ Version numbers track `.claude-plugin/plugin.json` and `package.json`, which are
 kept in step deliberately: `claude plugin update` compares that string, so a
 release that doesn't move it never reaches any other project.
 
+## Unreleased
+
+- **Changed**: `npm run usage` reads the SQLite store (`scripts/memory-usage.mjs`,
+  `src/lib/usageReport.js`) with the same table, totals and hygiene warnings; the Cypher
+  `scripts/memory-usage.sh` is gone.
+
 ## 0.7.0 — 2026-10-12
 
 - **Changed (breaking)**: the engine runs on SQLite (`~/.claude-neo4j/memory.sqlite`, via

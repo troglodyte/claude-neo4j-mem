@@ -13,7 +13,7 @@ Call the `memory_status` MCP tool and present the result: where memory is stored
 
 Call the `memory_list_projects` MCP tool. It returns every project in the graph with its entity count, observation count, and last-activity timestamp — across all projects, not just the current one. Present it as a table sorted by last activity.
 
-For a deeper report of the old Neo4j graph (legacy; it does not read the SQLite store), run `scripts/memory-usage.sh` from the plugin directory. On top of the same table it adds each project's first-seen date, observations in the last 7 days, database totals, and hygiene warnings: projects recorded under two different names (which silently splits one repo's memory in half), entities hoarding 100+ observations, and empty entity stubs. Use `--quiet` for just the table.
+For a deeper report across every project in the store, run `npm run usage` from the plugin directory. On top of the same table it adds each project's first-seen date, observations in the last 7 days, database totals, and hygiene warnings: projects recorded under two different names (which silently splits one repo's memory in half), entities hoarding 100+ observations, and empty entity stubs. Use `--quiet` for just the table.
 
 
 ## "This project's subsystem tags are a mess / everything is untagged"

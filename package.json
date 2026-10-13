@@ -20,7 +20,7 @@
     "test": "bash tests/launcher-path.test.sh && bash tests/memory-node.test.sh && bash tests/engine-resolve.test.sh && bash tests/image-name.test.sh && bash tests/boot-persistence.test.sh && node --test tests/*.test.js",
     "test:ci": "bash tests/launcher-path.test.sh && bash tests/memory-node.test.sh && bash tests/engine-resolve.test.sh && bash tests/image-name.test.sh && bash tests/boot-persistence.test.sh && node --test tests/*.test.js",
     "token-cost": "bash bin/memory-node scripts/token-cost.mjs",
-    "usage": "bash scripts/memory-usage.sh",
+    "usage": "bash bin/memory-node scripts/memory-usage.mjs",
     "health": "bash bin/memory-node scripts/check-health.mjs"
   },
   "dependencies": {

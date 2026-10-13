@@ -348,8 +348,10 @@ export async function pruneObservations({ project, olderThanDays = 180, keepPerE
 // Entity types whose observations always apply, matched by prefix against
 // `type` (one live entity is typed "Constraint Amendment"), plus the entity
 // named "user".
+// Exported for the usage report, which must agree on what counts as pinned.
 const PINNED_TYPES = ["user", "preference", "constraint", "convention"];
-const PINNED_WHERE = `${IN_SCOPE} AND (${PINNED_TYPES.map((type) => `lower(coalesce(e.type, '')) LIKE '${type}%'`).join(" OR ")} OR e.name = 'user')`;
+export const PINNED_ENTITY_SQL = `(${PINNED_TYPES.map((type) => `lower(coalesce(e.type, '')) LIKE '${type}%'`).join(" OR ")} OR e.name = 'user')`;
+const PINNED_WHERE = `${IN_SCOPE} AND ${PINNED_ENTITY_SQL}`;
 
 // Measured on 693 standing facts (engine spec, "Fix 2"): every pair at 0.8 or
 // more was a repeat, and the next pair down (0.73) was two different tickets.
