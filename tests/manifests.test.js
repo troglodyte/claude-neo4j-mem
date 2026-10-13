@@ -15,8 +15,16 @@ test("every hook command starts its script through bash bin/memory-node --hook",
   }
 });
 
+// Declared in plugin.json, not a root .mcp.json: Claude Code also reads a root
+// .mcp.json as a project server for a bare `claude` in this repo, where
+// ${CLAUDE_PLUGIN_ROOT} is never set and the server can only fail to start.
+test("the MCP server is declared in the plugin manifest, not a root .mcp.json", () => {
+  assert.equal(fs.existsSync(new URL("../.mcp.json", import.meta.url)), false);
+  assert.ok(read(".claude-plugin/plugin.json").mcpServers["neo4j-memory"]);
+});
+
 test("the MCP server starts through bash bin/memory-node", () => {
-  const server = read(".mcp.json").mcpServers["neo4j-memory"];
+  const server = read(".claude-plugin/plugin.json").mcpServers["neo4j-memory"];
   assert.equal(server.command, "bash");
   assert.deepEqual(server.args, ["${CLAUDE_PLUGIN_ROOT}/bin/memory-node", "${CLAUDE_PLUGIN_ROOT}/src/mcp/server.js"]);
 });

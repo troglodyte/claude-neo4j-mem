@@ -138,7 +138,7 @@ normal. Several ran that way before it was noticed.
   pinned to a git SHA. It never tracks the working tree, whether it came from
   GitHub or from a `directory` source, so local edits stay invisible to it
   until it is reinstalled.
-- **`--plugin-dir` is the only live mechanism.** `plugin.json`/`.mcp.json`
+- **`--plugin-dir` is the only live mechanism.** `plugin.json` (which also declares the MCP server)
   resolve `${CLAUDE_PLUGIN_ROOT}`, so pointing it at this repo runs the
   working tree. `claude-with-memory.sh` derives that path from its own
   location, which is why nothing here hardcodes a path.

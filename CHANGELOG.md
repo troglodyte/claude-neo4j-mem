@@ -13,6 +13,9 @@ release that doesn't move it never reaches any other project.
   `scripts/memory-usage.sh` is gone.
 - **Changed**: `npm run backfill-subsystems` reads and writes the SQLite store
   (`src/lib/subsystemBackfill.js`), so the usage report's retag advice works again.
+- **Fixed**: the MCP server is declared in `.claude-plugin/plugin.json` instead of a root
+  `.mcp.json`, which a bare `claude` in this repo also loaded as a project server that could
+  never start (`${CLAUDE_PLUGIN_ROOT}` unset there).
 
 ## 0.7.0 — 2026-10-12
 

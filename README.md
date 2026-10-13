@@ -233,7 +233,7 @@ On macOS, `engine-resolve.test.sh`'s pty case fails because it needs util-linux
 .claude-plugin/          plugin and marketplace manifests
 bin/memory-node          launcher: finds a Node with node:sqlite for every memory process
 hooks/hooks.json         SessionStart / PreCompact / SessionEnd wiring
-.mcp.json                MCP server registration
+.claude-plugin/plugin.json  also registers the MCP server (no root .mcp.json; see CLAUDE.md)
 skills/                  memory-search, memory-status, timeline-report
 src/mcp/server.js        MCP tools
 src/hooks/               session-start.js, capture.js

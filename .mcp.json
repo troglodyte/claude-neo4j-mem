@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "neo4j-memory": {
-      "command": "bash",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/memory-node", "${CLAUDE_PLUGIN_ROOT}/src/mcp/server.js"]
-    }
-  }
-}
