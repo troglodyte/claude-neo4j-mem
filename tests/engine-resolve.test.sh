@@ -195,9 +195,34 @@ fi
 # never reach the `read`/`case` at all -- a reordered or widened `case` could
 # not be caught by them. Drive a real pty (via `script`, which forkpty()s a
 # child) so the answer actually reaches `read -r -p` and the case arms below.
+#
+# `script` takes its command differently per platform: util-linux wants
+# `-c CMD FILE`, BSD/macOS wants `FILE CMD...` and rejects `-c` outright. With
+# only the Linux form, macOS ran nothing -- the decline case then passed
+# vacuously, since doing nothing never escalates. `uname` is shimmed to Linux
+# so both platforms take the sudo/apt-get arm (macOS's own arm is brew, which
+# needs no sudo), and each run must show the install prompt to count at all.
+cat >"$SHIM/uname" <<'EOF'
+#!/usr/bin/env bash
+echo Linux
+EOF
+chmod +x "$SHIM/uname"
+# stdin stays open a second past the answer: BSD `script` turns stdin's EOF
+# into a ^D on the pty, and an EOF that lands first makes `read` return empty.
+answer_in_pty() {
+  local log="$SHIM/pty.log"
+  if script -qec true /dev/null >/dev/null 2>&1; then
+    { printf '%s\n' "$1"; sleep 1; } | script -qec "env PATH=\"$SHIM:/usr/bin:/bin\" $BASH_BIN \"$SETUP\"" "$log" >/dev/null 2>&1
+  else
+    { printf '%s\n' "$1"; sleep 1; } | script -q "$log" env PATH="$SHIM:/usr/bin:/bin" "$BASH_BIN" "$SETUP" >/dev/null 2>&1
+  fi
+  grep -q 'sudo apt-get install -y podman' "$log"
+}
+
 rm -f "$SHIM/sudo.log"
-printf 'n\n' | script -qec "env PATH=\"$SHIM:/usr/bin:/bin\" $BASH_BIN \"$SETUP\"" /dev/null >/dev/null 2>&1
-if [ -f "$SHIM/sudo.log" ]; then
+if ! answer_in_pty n; then
+  fail "the pty decline never reached setup-local.sh's install prompt"
+elif [ -f "$SHIM/sudo.log" ]; then
   fail "setup-local.sh ran sudo despite an interactive (pty) decline: $(cat "$SHIM/sudo.log")"
 else
   pass "an interactive (pty) decline does not escalate"
@@ -209,8 +234,9 @@ fi
 # recording shim -- nothing is really installed, and the engine shims still
 # fail `info` afterwards so resolve_engine still reports failure).
 rm -f "$SHIM/sudo.log"
-printf 'y\n' | script -qec "env PATH=\"$SHIM:/usr/bin:/bin\" $BASH_BIN \"$SETUP\"" /dev/null >/dev/null 2>&1
-if [ -f "$SHIM/sudo.log" ] && grep -q 'apt-get' "$SHIM/sudo.log"; then
+if ! answer_in_pty y; then
+  fail "the pty accept never reached setup-local.sh's install prompt"
+elif [ -f "$SHIM/sudo.log" ] && grep -q 'apt-get' "$SHIM/sudo.log"; then
   pass "an interactive (pty) accept does escalate via the recording shim"
 else
   fail "setup-local.sh did not invoke sudo apt-get after an interactive (pty) accept"

@@ -15,11 +15,25 @@ async function withServer(work) {
   const store = path.join(home, "memory.sqlite");
   const child = spawn(process.execPath, [SERVER], {
     cwd: home,
-    stdio: ["pipe", "pipe", "ignore"],
+    stdio: ["pipe", "pipe", "pipe"],
     env: { ...process.env, HOME: home, CLAUDE_NEO4J_SQLITE: store },
   });
   const waiting = new Map();
   let buffer = "";
+  // A server that dies (a missing dependency, say) must fail the test with its
+  // stderr, not leave every pending request waiting for a reply forever.
+  let stderr = "";
+  let exited = null;
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  child.on("exit", (code, signal) => {
+    exited = new Error(`memory server exited (${signal ?? code}) before replying:\n${stderr}`);
+    for (const settle of waiting.values()) {
+      settle(exited);
+    }
+    waiting.clear();
+  });
   child.stdout.on("data", (chunk) => {
     buffer += chunk;
     let newline;
@@ -31,9 +45,13 @@ async function withServer(work) {
   });
   let lastId = 0;
   const request = (method, params) =>
-    new Promise((resolve) => {
+    new Promise((resolve, reject) => {
+      if (exited) {
+        reject(exited);
+        return;
+      }
       lastId += 1;
-      waiting.set(lastId, resolve);
+      waiting.set(lastId, (reply) => (reply instanceof Error ? reject(reply) : resolve(reply)));
       child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: lastId, method, params })}\n`);
     });
   const callTool = async (name, args = {}) => {

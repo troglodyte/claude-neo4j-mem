@@ -171,7 +171,10 @@ normal. Several ran that way before it was noticed.
 
 - `scripts/claude-with-memory.sh` — launch Claude Code with this plugin loaded.
 - `npm test` — `node --test` plus the guard that keeps `scripts/*.sh` from
-  silently resolving the plugin directory to `/` (see above).
+  silently resolving the plugin directory to `/` (see above). **Run `npm ci`
+  first in any fresh checkout or worktree**: without `node_modules` the
+  `neo4j-driver` tests fail and the MCP server dies on startup, which
+  `mcp-server.test.js` now reports with the server's stderr instead of hanging.
 - `scripts/setup-local.sh` (legacy) — idempotent: starts the local container if needed,
   waits for health, and (re)runs the configure wizard against it.
 - `npm run configure` (legacy) / `node scripts/configure.mjs --mode ... --uri ...` —
