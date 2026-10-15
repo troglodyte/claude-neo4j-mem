@@ -6,7 +6,7 @@ Version numbers track `.claude-plugin/plugin.json` and `package.json`, which are
 kept in step deliberately: `claude plugin update` compares that string, so a
 release that doesn't move it never reaches any other project.
 
-## Unreleased
+## 0.8.0 — 2026-10-15
 
 - **Added**: `npm run stats` (`scripts/memory-stats.mjs`, `src/lib/statsReport.js`), a
   per-project view of the store: weekly growth over 12 UTC weeks, observations per session,

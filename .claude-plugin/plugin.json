@@ -1,7 +1,7 @@
 {
   "name": "neo4j-memory",
   "displayName": "Neo4j Memory",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Persistent memory for Claude Code in a local SQLite file (node:sqlite; no server, no container). Injects standing facts and a subsystem map at session start, captures new facts at compaction and session end, and exposes search tools. A machine's Neo4j graph moves across by itself on first start.",
   "author": {
     "name": "Michael Harris"
