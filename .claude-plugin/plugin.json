@@ -11,6 +11,7 @@
     "sqlite",
     "knowledge-graph"
   ],
+  "types": "./types/index.d.ts",
   "mcpServers": {
     "neo4j-memory": {
       "command": "bash",

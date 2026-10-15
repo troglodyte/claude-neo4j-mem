@@ -2,5 +2,7 @@ node_modules/
 docker/.env
 *.log
 .claude/settings.local.json
+# Mod type declarations Claude Code writes for its own version when it loads the plugin from a folder
+.claude-plugin/types/
 
 .superpowers/

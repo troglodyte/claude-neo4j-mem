@@ -163,6 +163,11 @@ and retries at the next session start, up to 3 attempts.
 - "Is memory working?": `memory-status` / `memory_status`.
 - "Give me a timeline report": the `timeline-report` skill / `memory_timeline`.
 - Tell Claude to forget something: `memory_delete_entity` / `memory_delete_observations`.
+- `/memory-stats [--all | --project ID]`: shows or hides a side pane with `npm run stats`'s
+  report for the project you are in, refreshed when a turn ends; `r` refreshes, `a` switches
+  between this project and all of them. It is the plugin's mod (`hooks/stats-pane.tsx`), so it
+  needs Claude Code 2.1.287 or later; with no surface to draw a pane (`claude -p`) it prints the
+  report instead.
 
 ### Outside a Claude session
 
@@ -230,6 +235,11 @@ The temporary `HOME` keeps tests away from your real store and settings, and the
 matters if capture is switched off in your settings, which would fail the capture tests.
 On macOS, `engine-resolve.test.sh`'s pty case fails because it needs util-linux
 `script -qec`.
+
+The mod (`hooks/stats-pane.tsx`, named by `modules` in `hooks/hooks.json`) is TypeScript
+that Claude Code loads directly, so `npm test` does not reach it. `npm run test:mod` runs
+`claude plugin validate` and `claude plugin test` on it; `tsc -p .` type-checks it once
+Claude Code has written `.claude-plugin/types/` (it does on a `--plugin-dir` load).
 
 ## Project layout
 

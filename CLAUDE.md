@@ -192,6 +192,10 @@ normal. Several ran that way before it was noticed.
   (`src/lib/statsReport.js`): weekly growth, session yield, observation
   length, subsystem spread, relations. The project comes from `INIT_CWD`, so
   `npm --prefix <plugin dir> run stats` reports the repo it is typed in.
+  `/memory-stats` shows the same report in a pane: the plugin's mod,
+  `hooks/stats-pane.tsx`, which shells out to this script because a hooks module
+  has no Node and no `node:sqlite`. `npm test` never loads it; `npm run test:mod`
+  (`claude plugin validate` + `claude plugin test`) does.
 - `npm run token-cost [-- --all]` — measures every read path against a
   per-call ceiling and exits non-zero on regression.
 - `npm run telemetry [-- --days N]` — access patterns from

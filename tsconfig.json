@@ -1,0 +1,18 @@
+{
+  "//": "Type-checks the plugin's mod (hooks/stats-pane.tsx) with `tsc -p .`, against the declarations Claude Code writes into .claude-plugin/types/ when it loads the plugin from a folder (scripts/claude-with-memory.sh). The rest of the plugin is plain JavaScript and is not checked here.",
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["es2023"],
+    "types": [],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "jsx": "react",
+    "jsxFactory": "h",
+    "jsxFragmentFactory": "Fragment"
+  },
+  "include": [".claude-plugin/types", "hooks/**/*.tsx", "types", "tests/**/*.test.ts"]
+}

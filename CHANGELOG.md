@@ -12,6 +12,10 @@ release that doesn't move it never reaches any other project.
   per-project view of the store: weekly growth over 12 UTC weeks, observations per session,
   observation length, subsystem spread and relations. It defaults to the repo it is run from
   (`INIT_CWD`); `--project ID` and `--all` widen it.
+- **Added**: `/memory-stats`, the plugin's first mod (`hooks/stats-pane.tsx`): a side pane with
+  that report for the session's project, refreshed when a turn ends, with buttons to refresh
+  and to switch to all projects. A bare `/memory-stats` toggles the pane; `--all` and
+  `--project ID` pass through. Needs Claude Code 2.1.287 or later. `npm run test:mod` tests it.
 - **Changed**: `npm run usage` reads the SQLite store (`scripts/memory-usage.mjs`,
   `src/lib/usageReport.js`) with the same table, totals and hygiene warnings; the Cypher
   `scripts/memory-usage.sh` is gone.
