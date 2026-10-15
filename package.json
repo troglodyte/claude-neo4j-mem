@@ -16,6 +16,7 @@
     "restore": "bash bin/memory-node scripts/restore.mjs",
     "search-parity": "bash bin/memory-node scripts/search-parity.mjs",
     "search-review": "node scripts/search-payload-review.mjs",
+    "stats": "bash bin/memory-node scripts/memory-stats.mjs",
     "telemetry": "node scripts/telemetry-report.mjs",
     "test": "bash tests/launcher-path.test.sh && bash tests/memory-node.test.sh && bash tests/engine-resolve.test.sh && bash tests/image-name.test.sh && bash tests/boot-persistence.test.sh && node --test tests/*.test.js",
     "test:ci": "bash tests/launcher-path.test.sh && bash tests/memory-node.test.sh && bash tests/engine-resolve.test.sh && bash tests/image-name.test.sh && bash tests/boot-persistence.test.sh && node --test tests/*.test.js",

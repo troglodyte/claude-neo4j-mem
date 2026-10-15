@@ -188,6 +188,10 @@ normal. Several ran that way before it was noticed.
   project names, oversized entities, empty stubs, expensive subsystem maps,
   and — the opposite failure — a map collapsed into one dominant tag or a
   large unclassified history). `--quiet` for table only.
+- `npm run stats [-- --project ID | --all]` — one project's trend view
+  (`src/lib/statsReport.js`): weekly growth, session yield, observation
+  length, subsystem spread, relations. The project comes from `INIT_CWD`, so
+  `npm --prefix <plugin dir> run stats` reports the repo it is typed in.
 - `npm run token-cost [-- --all]` — measures every read path against a
   per-call ceiling and exits non-zero on regression.
 - `npm run telemetry [-- --days N]` — access patterns from

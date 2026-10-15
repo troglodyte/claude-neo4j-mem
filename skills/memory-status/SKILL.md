@@ -15,6 +15,10 @@ Call the `memory_list_projects` MCP tool. It returns every project in the graph 
 
 For a deeper report across every project in the store, run `npm run usage` from the plugin directory. On top of the same table it adds each project's first-seen date, observations in the last 7 days, database totals, and hygiene warnings: projects recorded under two different names (which silently splits one repo's memory in half), entities hoarding 100+ observations, and empty entity stubs. Use `--quiet` for just the table.
 
+## "How has memory grown / what does this project's memory look like?"
+
+Run `npm --prefix <plugin directory> run stats` from the project's directory. It reports that project only: totals and entity types, new observations and entities per week for the last 12 weeks, observations per session, observation length, the subsystem spread, and the most-connected entities. `-- --project ID` reports another project and `-- --all` the whole store. A project with nothing recorded gets a one-line pointer instead, which usually means the repo's remote changed and its memory sits under the old name: `npm run usage` shows both.
+
 
 ## "This project's subsystem tags are a mess / everything is untagged"
 

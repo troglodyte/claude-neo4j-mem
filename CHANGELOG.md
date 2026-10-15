@@ -8,6 +8,10 @@ release that doesn't move it never reaches any other project.
 
 ## Unreleased
 
+- **Added**: `npm run stats` (`scripts/memory-stats.mjs`, `src/lib/statsReport.js`), a
+  per-project view of the store: weekly growth over 12 UTC weeks, observations per session,
+  observation length, subsystem spread and relations. It defaults to the repo it is run from
+  (`INIT_CWD`); `--project ID` and `--all` widen it.
 - **Changed**: `npm run usage` reads the SQLite store (`scripts/memory-usage.mjs`,
   `src/lib/usageReport.js`) with the same table, totals and hygiene warnings; the Cypher
   `scripts/memory-usage.sh` is gone.

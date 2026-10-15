@@ -172,6 +172,10 @@ and retries at the next session start, up to 3 attempts.
   `dupes [--min 0.3]` lists likely repeated standing facts, most similar first.
 - `npm run health`: the launcher's Node, the store file, its schema and integrity, its
   contents and the last migration, PASS/FAIL per check.
+- `npm run stats [-- --project ID | --all]`: one project's memory over time: weekly
+  growth, observations per session, observation length, subsystem spread and relations.
+  Defaults to the repo you run it from, so `npm --prefix <plugin dir> run stats` works
+  from any checkout.
 - `npm run token-cost [-- --all]`: see [Token cost](#token-cost).
 - `npm run telemetry [-- --days N]`: how memory is used: reads and writes per project,
   characters served, misses, and the searches that found nothing. Reads
